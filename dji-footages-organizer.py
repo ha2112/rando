@@ -62,19 +62,64 @@ def create_new_filename(parsed_info, description, counter):
     return f"[{date_part}_{time_part}]_{clean_title}_#{counter}.{ext}"
 
 
-def find_existing_folder_for_date(source_path, date):
+def find_all_folders_for_date(source_path, date):
     """
-    Check if a folder already exists for [YYYY.MM.DD]
+    Find ALL folders that exist for a given date [YYYY.MM.DD]
+    Supports both formats:
+    - [YYYY.MM.DD] #X description (new format)
+    - [YYYY.MM.DD] description (legacy format without #X)
+    
+    Returns a list of tuples: [(folder_path, folder_number, description, has_number), ...]
     """
     source_dir = Path(source_path)
     display_date = date.replace('-', '.')
     prefix = f"[{display_date}]"
     
+    folders = []
+    # Pattern for new format: [YYYY.MM.DD] #X description
+    pattern_with_number = re.compile(rf'\[{re.escape(display_date)}\]\s*#(\d+)\s+(.+)')
+    # Pattern for legacy format: [YYYY.MM.DD] description (no #X)
+    pattern_without_number = re.compile(rf'\[{re.escape(display_date)}\]\s+(.+)')
+    
     for item in source_dir.iterdir():
         if item.is_dir() and item.name.startswith(prefix):
-            description = item.name[len(prefix):].strip()
-            return item, description
-    return None, None
+            # Try matching new format first
+            match = pattern_with_number.match(item.name)
+            if match:
+                folder_num = int(match.group(1))
+                description = match.group(2).strip()
+                folders.append((item, folder_num, description, True))
+            else:
+                # Try legacy format
+                match = pattern_without_number.match(item.name)
+                if match:
+                    description = match.group(1).strip()
+                    # Legacy folders get assigned number 0 (will be handled specially)
+                    folders.append((item, 0, description, False))
+    
+    # Sort: legacy folders (0) first, then by folder number
+    folders.sort(key=lambda x: x[1])
+    return folders
+
+
+def get_next_folder_number(source_path, date):
+    """
+    Get the next available folder number for a given date
+    Accounts for both numbered and legacy unnumbered folders
+    """
+    existing_folders = find_all_folders_for_date(source_path, date)
+    if not existing_folders:
+        return 1
+    
+    # Find highest numbered folder (skip legacy folders with number 0)
+    numbered_folders = [f for f in existing_folders if f[3]]  # f[3] is has_number
+    
+    if not numbered_folders:
+        # Only legacy folders exist, start numbering from 1
+        return 1
+    
+    # Return highest folder number + 1
+    return max(f[1] for f in numbered_folders) + 1
 
 
 def get_highest_part_number(folder_path):
@@ -131,22 +176,47 @@ def process_files(source_path):
         files = grouped_files[date]
         print(f"\n📁 Processing date: {date}")
         
-        existing_folder, existing_description = find_existing_folder_for_date(source_path, date)
+        existing_folders = find_all_folders_for_date(source_path, date)
         display_date = date.replace('-', '.')
         
-        if existing_folder:
-            print(f"   Found existing folder: {existing_folder.name}")
-            use_existing = input(f"   Use this folder? (Y/n): ").strip().lower()
-            if use_existing in ['', 'y', 'yes']:
-                description = existing_description
-                folder_path = existing_folder
-            else:
-                description = input(f"   Enter NEW description for {display_date}: ").strip()
-                folder_name = f"[{display_date}] {description}"
+        if existing_folders:
+            print(f"   Found {len(existing_folders)} existing folder(s) for this date:")
+            for i, (folder_path, folder_num, desc, has_number) in enumerate(existing_folders, 1):
+                if has_number:
+                    print(f"      {i}. {folder_path.name}")
+                else:
+                    print(f"      {i}. {folder_path.name} [LEGACY - no #X]")
+            
+            print(f"      {len(existing_folders) + 1}. Create NEW folder")
+            
+            choice = input(f"   Select option (1-{len(existing_folders) + 1}): ").strip()
+            
+            try:
+                choice_idx = int(choice) - 1
+                if 0 <= choice_idx < len(existing_folders):
+                    # Use existing folder
+                    folder_path, folder_num, description, has_number = existing_folders[choice_idx]
+                    print(f"   Using: {folder_path.name}")
+                    
+                    if not has_number:
+                        print(f"   ⚠️  WARNING: This is a legacy folder without #X numbering")
+                else:
+                    # Create new folder
+                    folder_num = get_next_folder_number(source_path, date)
+                    description = input(f"   Enter description for new folder: ").strip()
+                    folder_name = f"[{display_date}] #{folder_num} {description}"
+                    folder_path = Path(source_path) / folder_name
+            except (ValueError, IndexError):
+                print("   Invalid choice, creating new folder...")
+                folder_num = get_next_folder_number(source_path, date)
+                description = input(f"   Enter description for new folder: ").strip()
+                folder_name = f"[{display_date}] #{folder_num} {description}"
                 folder_path = Path(source_path) / folder_name
         else:
+            # No existing folders, create first one
+            folder_num = 1
             description = input(f"   Enter description for {display_date}: ").strip()
-            folder_name = f"[{display_date}] {description}"
+            folder_name = f"[{display_date}] #{folder_num} {description}"
             folder_path = Path(source_path) / folder_name
 
         if not DRY_RUN:
