@@ -24,12 +24,27 @@ def parse_dji_filename(filename):
     """
     Parse DJI filename to extract date/time components.
     Format: DJI_YYYYMMDDHHMMSS_XXXX_D.EXT
+    Supports: MP4, WAV, DNG, JPG
     """
     pattern = r'DJI_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})_(\d{4})_D\.(\w+)'
     match = re.match(pattern, filename, re.IGNORECASE)
     
     if match:
         year, month, day, hour, minute, second, sequence, ext = match.groups()
+        ext_lower = ext.lower()
+        
+        # Determine file type
+        if ext_lower in ['mp4', 'mov']:
+            file_type = 'video'
+        elif ext_lower == 'wav':
+            file_type = 'audio'
+        elif ext_lower == 'dng':
+            file_type = 'raw_image'
+        elif ext_lower in ['jpg', 'jpeg']:
+            file_type = 'image'
+        else:
+            file_type = 'unknown'
+        
         return {
             'year': year,
             'short_year': year[-2:], # last two digits
@@ -39,16 +54,20 @@ def parse_dji_filename(filename):
             'minute': minute,
             'second': second,
             'sequence': sequence,
-            'extension': ext.lower(),
+            'extension': ext_lower,
+            'file_type': file_type,
             'date': f"{year}-{month}-{day}",
             'timestamp': f"{year}{month}{day}{hour}{minute}{second}"
         }
     return None
 
 
-def create_new_filename(parsed_info, description, counter):
+def create_new_filename(parsed_info, description, counter, file_type_prefix):
     """
-    Creates filename: [dd-mm-yy_hh-mm-ss]_title_in_lowercase_#X
+    Creates filename with type prefix:
+    - Videos: [dd-mm-yy_hh-mm-ss]_[VID]_title_in_lowercase_#X.ext
+    - Audio:  [dd-mm-yy_hh-mm-ss]_[AU]_title_in_lowercase_#X.ext
+    - Images: [dd-mm-yy_hh-mm-ss]_[IMG]_title_in_lowercase_#X.ext
     """
     # Format components
     date_part = f"{parsed_info['day']}-{parsed_info['month']}-{parsed_info['short_year']}"
@@ -59,7 +78,20 @@ def create_new_filename(parsed_info, description, counter):
     
     ext = parsed_info['extension']
     
-    return f"[{date_part}_{time_part}]_{clean_title}_#{counter}.{ext}"
+    return f"[{date_part}_{time_part}]_[{file_type_prefix}]_{clean_title}_#{counter}.{ext}"
+
+
+def get_file_type_prefix(file_type):
+    """
+    Returns the appropriate prefix for each file type
+    """
+    prefix_map = {
+        'video': 'VID',
+        'audio': 'AU',
+        'raw_image': 'IMG',
+        'image': 'IMG'
+    }
+    return prefix_map.get(file_type, 'FILE')
 
 
 def find_all_folders_for_date(source_path, date):
@@ -122,16 +154,17 @@ def get_next_folder_number(source_path, date):
     return max(f[1] for f in numbered_folders) + 1
 
 
-def get_highest_part_number(folder_path):
+def get_highest_part_number(folder_path, file_type_prefix):
     """
-    Scans folder to find the current highest #X suffix.
+    Scans folder to find the current highest #X suffix for a specific file type.
+    Different file types (VID, AU, IMG) have independent numbering.
     """
     if not folder_path.exists():
         return 0
     
     highest = 0
-    # Regex looks for # followed by digits at the end of the filename (before extension)
-    pattern = re.compile(r'_#(\d+)\.\w+$')
+    # Regex looks for [PREFIX]_...#X.ext pattern
+    pattern = re.compile(rf'\[{file_type_prefix}\]_.*?_#(\d+)\.\w+$')
     
     for file_path in folder_path.iterdir():
         if file_path.is_file():
@@ -162,6 +195,30 @@ def group_files_by_date(source_path):
     return grouped_files
 
 
+def get_file_summary(timestamp_groups):
+    """
+    Generate summary of files to be processed
+    Returns: dict with counts of videos, images, and total items
+    """
+    video_count = 0
+    image_count = 0
+    
+    for timestamp, files in timestamp_groups.items():
+        has_video = any(f['parsed']['file_type'] in ['video', 'audio'] for f in files)
+        has_image = any(f['parsed']['file_type'] in ['raw_image', 'image'] for f in files)
+        
+        if has_video:
+            video_count += 1
+        if has_image:
+            image_count += 1
+    
+    return {
+        'videos': video_count,
+        'images': image_count,
+        'total': video_count + image_count
+    }
+
+
 def process_files(source_path):
     print("=" * 70)
     print(f"MODE: {'DRY RUN' if DRY_RUN else 'LIVE MODE'}")
@@ -175,6 +232,15 @@ def process_files(source_path):
     for date in sorted(grouped_files.keys()):
         files = grouped_files[date]
         print(f"\n📁 Processing date: {date}")
+        
+        # Group by timestamp to show summary
+        timestamp_groups = defaultdict(list)
+        for f_info in files:
+            timestamp_groups[f_info['parsed']['timestamp']].append(f_info)
+        
+        # Show file summary
+        summary = get_file_summary(timestamp_groups)
+        print(f"   Found: {summary['videos']} video(s), {summary['images']} image(s) ({summary['total']} total items)")
         
         existing_folders = find_all_folders_for_date(source_path, date)
         display_date = date.replace('-', '.')
@@ -221,23 +287,48 @@ def process_files(source_path):
 
         if not DRY_RUN:
             folder_path.mkdir(exist_ok=True)
-
-        # Sync/Group by timestamp (video + audio pairs)
-        timestamp_groups = defaultdict(list)
-        for f_info in files:
-            timestamp_groups[f_info['parsed']['timestamp']].append(f_info)
         
-        # Determine starting counter
-        counter = get_highest_part_number(folder_path) + 1
+        # Initialize separate counters for each file type
+        video_counter = get_highest_part_number(folder_path, 'VID') + 1
+        audio_counter = get_highest_part_number(folder_path, 'AU') + 1
+        image_counter = get_highest_part_number(folder_path, 'IMG') + 1
         
+        # Process each timestamp group
         for timestamp in sorted(timestamp_groups.keys()):
-            for file_info in timestamp_groups[timestamp]:
+            group_files = timestamp_groups[timestamp]
+            
+            # Determine what type of item this is and which counter to use
+            file_types = {f['parsed']['file_type'] for f in group_files}
+            
+            if 'video' in file_types or 'audio' in file_types:
+                item_type = "🎥 Video"
+                current_counter = video_counter
+            elif 'raw_image' in file_types or 'image' in file_types:
+                item_type = "📷 Image"
+                current_counter = image_counter
+            else:
+                item_type = "📄 File"
+                current_counter = 1
+            
+            # Process all files in this timestamp group
+            for file_info in group_files:
                 old_path = file_info['original_path']
+                file_type = file_info['parsed']['file_type']
+                file_type_prefix = get_file_type_prefix(file_type)
+                
+                # Use the appropriate counter based on file type
+                if file_type in ['video', 'audio']:
+                    counter_to_use = video_counter
+                elif file_type in ['raw_image', 'image']:
+                    counter_to_use = image_counter
+                else:
+                    counter_to_use = 1
                 
                 new_filename = create_new_filename(
                     file_info['parsed'], 
                     description, 
-                    counter
+                    counter_to_use,
+                    file_type_prefix
                 )
                 new_path = folder_path / new_filename
                 
@@ -250,7 +341,15 @@ def process_files(source_path):
                     except Exception as e:
                         print(f"   ❌ Error renaming {old_path.name}: {e}")
             
-            counter += 1
+            # Show what was processed and increment the appropriate counter
+            if not DRY_RUN:
+                print(f"      {item_type} #{current_counter} processed")
+            
+            # Increment the appropriate counter
+            if 'video' in file_types or 'audio' in file_types:
+                video_counter += 1
+            elif 'raw_image' in file_types or 'image' in file_types:
+                image_counter += 1
 
 if __name__ == "__main__":
     if not SOURCE_FOLDER:
