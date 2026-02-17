@@ -64,10 +64,10 @@ def parse_dji_filename(filename):
 
 def create_new_filename(parsed_info, description, counter, file_type_prefix):
     """
-    Creates filename with type prefix:
-    - Videos: [dd-mm-yy_hh-mm-ss]_[VID]_title_in_lowercase_#X.ext
-    - Audio:  [dd-mm-yy_hh-mm-ss]_[AU]_title_in_lowercase_#X.ext
-    - Images: [dd-mm-yy_hh-mm-ss]_[IMG]_title_in_lowercase_#X.ext
+    Creates filename with type prefix before the number:
+    - Videos: [dd-mm-yy_hh-mm-ss]_title_in_lowercase_[VID]_#X.ext
+    - Audio:  [dd-mm-yy_hh-mm-ss]_title_in_lowercase_[AU]_#X.ext
+    - Images: [dd-mm-yy_hh-mm-ss]_title_in_lowercase_[IMG]_#X.ext
     """
     # Format components
     date_part = f"{parsed_info['day']}-{parsed_info['month']}-{parsed_info['short_year']}"
@@ -78,7 +78,7 @@ def create_new_filename(parsed_info, description, counter, file_type_prefix):
     
     ext = parsed_info['extension']
     
-    return f"[{date_part}_{time_part}]_[{file_type_prefix}]_{clean_title}_#{counter}.{ext}"
+    return f"[{date_part}_{time_part}]_{clean_title}_[{file_type_prefix}]_#{counter}.{ext}"
 
 
 def get_file_type_prefix(file_type):
@@ -163,8 +163,8 @@ def get_highest_part_number(folder_path, file_type_prefix):
         return 0
     
     highest = 0
-    # Regex looks for [PREFIX]_...#X.ext pattern
-    pattern = re.compile(rf'\[{file_type_prefix}\]_.*?_#(\d+)\.\w+$')
+    # Regex looks for [PREFIX]_#X.ext pattern (updated to match new format)
+    pattern = re.compile(rf'\[{file_type_prefix}\]_#(\d+)\.\w+$')
     
     for file_path in folder_path.iterdir():
         if file_path.is_file():
