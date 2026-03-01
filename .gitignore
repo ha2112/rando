@@ -128,3 +128,18 @@ dist
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
+
+# Python files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pyzw
+*.pyz
+
+client_secrets.json
+token.json
+uploaded_files.json
