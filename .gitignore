@@ -143,3 +143,6 @@ __pycache__/
 client_secrets.json
 token.json
 uploaded_files.json
+
+.venv/
+
