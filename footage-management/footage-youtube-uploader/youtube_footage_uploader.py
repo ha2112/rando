@@ -341,10 +341,28 @@ def discover_video_files(root: Path) -> list[tuple[Path, Path]]:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    # ── Ask for Dry Run ────────────────────────────────────────────────────
-    # Set to True to see what would happen without actually uploading files
-    input_for_dry_run = input("[YOUTUBE UPLOADER] Dry run (theoretical run): y/n\n").lower()
-    DRY_RUN = False if input_for_dry_run == "n" else True
+    # ── Dry run selection (CLI-friendly) ───────────────────────────────────
+    #
+    # Priority:
+    #   1. Command-line flag (for automation: cron/launchd/etc.)
+    #   2. Interactive prompt (for manual runs)
+    #
+    # Flags:
+    #   --no-dry-run / --live / -L  → real uploads, no prompt
+    #   --dry-run / -d              → dry run, no prompt
+    DRY_RUN = True  # default to dry run if nothing specified
+
+    args = [a.lower() for a in sys.argv[1:]]
+    if any(a in ("--no-dry-run", "--live", "-l", "-L") for a in args):
+        DRY_RUN = False
+    elif any(a in ("--dry-run", "-d") for a in args):
+        DRY_RUN = True
+    else:
+        # No flags given → fall back to interactive selection
+        input_for_dry_run = input(
+            "[YOUTUBE UPLOADER] Dry run (theoretical run): y/n\n"
+        ).lower()
+        DRY_RUN = False if input_for_dry_run == "n" else True
 
     if DRY_RUN:
         print("\n🚨 DRY RUN MODE ENABLED: Videos will not be uploaded, databases will not be changed.\n")
@@ -436,6 +454,31 @@ def main() -> None:
         except HttpError as err:
             # ── Handle YouTube specific HTTP errors ────────────────────────
             
+            # Status 400 with reason=uploadLimitExceeded means the channel's
+            # upload cap has been reached for now. Stop immediately so we
+            # don't waste time attempting further uploads in this run.
+            if err.resp.status == 400:
+                try:
+                    error_body = json.loads(err.content.decode())
+                    reason = (
+                        error_body.get("error", {})
+                                  .get("errors", [{}])[0]
+                                  .get("reason", "")
+                    )
+                except Exception:
+                    reason = ""
+
+                if reason == "uploadLimitExceeded":
+                    if not DRY_RUN:
+                        save_db(db)
+                    print(
+                        "\n🚫  YouTube upload limit for this account has been reached.\n"
+                        f"   Progress saved  → {uploaded} uploaded, "
+                        f"{skipped} skipped, {failed} failed.\n"
+                        "   Try again later when YouTube resets your upload limit.\n"
+                    )
+                    sys.exit(0)
+
             # Status 403 often means we hit YouTube's strict daily API quota limit
             if err.resp.status == 403:
                 try:
