@@ -341,6 +341,9 @@ def discover_video_files(root: Path) -> list[tuple[Path, Path]]:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+
+    start_time = time.time()
+    print(f"Start time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_time))}")
     # ── Dry run selection (CLI-friendly) ───────────────────────────────────
     #
     # Priority:
@@ -522,6 +525,9 @@ def main() -> None:
     if not DRY_RUN:
         print(f"📋  DB file  : {UPLOAD_DB_FILE}")
     print("=" * 60)
+    end_time = time.time()
+    print(f"End time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(end_time))}")
+    print(f"Total time: {end_time - start_time} seconds")
 
 
 if __name__ == "__main__":
