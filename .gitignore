@@ -146,3 +146,4 @@ uploaded_files.json
 
 .venv/
 
+*.log
