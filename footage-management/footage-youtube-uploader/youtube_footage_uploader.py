@@ -57,6 +57,9 @@ CHUNK_SIZE       = 1 * 1024 * 1024   # 1 MB
 MAX_RETRIES      = 5
 RETRY_SLEEP_BASE = 2   # seconds  (exponential back-off: 2, 4, 8, 16, 32 s)
 
+# Output mode: True = log-friendly (no tqdm, for cron/automation), False = interactive (tqdm, for manual runs)
+LOG_MODE = False
+
 # ── Filename / foldername parsers ─────────────────────────────────────────────
 
 # Matches: [DD-MM-YY_HH-MM-SS]_anything_#X.mp4
@@ -229,7 +232,9 @@ def upload_video(
     description: str,
 ) -> str:
     """
-    Upload a single video to YouTube (private) with a live tqdm progress bar.
+    Upload a single video to YouTube (private).
+    In interactive mode: shows a live tqdm progress bar.
+    In log mode: no progress bar, log-friendly output.
     Returns the YouTube video ID on success.
     Raises HttpError on unrecoverable API errors.
     """
@@ -267,45 +272,64 @@ def upload_video(
     retry_count = 0
     bytes_sent  = 0
 
-    # Initialize the visual progress bar (tqdm)
-    with tqdm(
-        total=file_size,
-        unit="B",
-        unit_scale=True,
-        unit_divisor=1024,
-        desc=f"  ↑ {file_path.name[:48]}",
-        leave=True,
-        colour="green",
-    ) as pbar:
+    def do_upload_chunk():
+        nonlocal response, bytes_sent
+        status, response = request.next_chunk()
+        if status:
+            new_bytes = int(status.resumable_progress)
+            bytes_sent = new_bytes
+        return status, response
+
+    def handle_retry(err):
+        nonlocal retry_count
+        retry_count += 1
+        if retry_count > MAX_RETRIES:
+            raise
+        sleep_time = RETRY_SLEEP_BASE ** retry_count
+        if LOG_MODE:
+            print(f"   [WARN] Server error {err.resp.status}. Retrying in {sleep_time}s ({retry_count}/{MAX_RETRIES})")
+        else:
+            print(
+                f"\n   ⚠️  Server error {err.resp.status}. "
+                f"Retrying in {sleep_time}s… ({retry_count}/{MAX_RETRIES})"
+            )
+        time.sleep(sleep_time)
+
+    if LOG_MODE:
+        # Log mode: no tqdm, simple progress messages
         while response is None:
             try:
-                # Upload the next CHUNK_SIZE of bytes
-                status, response = request.next_chunk()
-                if status:
-                    new_bytes = int(status.resumable_progress)
-                    pbar.update(new_bytes - bytes_sent)
-                    bytes_sent = new_bytes
-
+                status, response = do_upload_chunk()
             except HttpError as err:
-                # 500-level errors are typically server-side issues
                 if err.resp.status in (500, 502, 503, 504):
-                    retry_count += 1
-                    if retry_count > MAX_RETRIES:
-                        raise # Give up after maximum allowed retries
-                    
-                    # Exponential back-off: pause longer after each consecutive failure
-                    sleep_time = RETRY_SLEEP_BASE ** retry_count
-                    print(
-                        f"\n   ⚠️  Server error {err.resp.status}. "
-                        f"Retrying in {sleep_time}s… ({retry_count}/{MAX_RETRIES})"
-                    )
-                    time.sleep(sleep_time)
+                    handle_retry(err)
                 else:
-                    # Non-retryable errors bubble up immediately
-                    raise   
-
-        # Advance bar to 100% after the final chunk
-        pbar.update(file_size - bytes_sent)
+                    raise
+        # Log completion
+        size_mb = file_size / (1024 * 1024)
+        print(f"   [OK] Uploaded {file_path.name} ({size_mb:.1f} MB)")
+    else:
+        # Interactive mode: tqdm progress bar
+        with tqdm(
+            total=file_size,
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
+            desc=f"  ↑ {file_path.name[:48]}",
+            leave=True,
+            colour="green",
+        ) as pbar:
+            while response is None:
+                try:
+                    status, response = do_upload_chunk()
+                    if status:
+                        pbar.update(bytes_sent - pbar.n)
+                except HttpError as err:
+                    if err.resp.status in (500, 502, 503, 504):
+                        handle_retry(err)
+                    else:
+                        raise
+            pbar.update(file_size - bytes_sent)
 
     return response["id"]
 
@@ -341,13 +365,19 @@ def discover_video_files(root: Path) -> list[tuple[Path, Path]]:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    global LOG_MODE
 
     start_time = time.time()
+
+    # ── Output mode (log vs interactive) ───────────────────────────────────
+    #   --anything  → log-friendly output (no tqdm, for cron/automation)
+    #   (no flag)     → interactive output (tqdm, for manual runs in Cursor)
+
     print(f"Start time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_time))}")
     # ── Dry run selection (CLI-friendly) ───────────────────────────────────
     #
     # Priority:
-    #   1. Command-line flag (for automation: cron/launchd/etc.)
+    #   1. Command-line flag (for automation: cron)
     #   2. Interactive prompt (for manual runs)
     #
     # Flags:
@@ -358,8 +388,10 @@ def main() -> None:
     args = [a.lower() for a in sys.argv[1:]]
     if any(a in ("--no-dry-run", "--live", "-l", "-L") for a in args):
         DRY_RUN = False
+        LOG_MODE = True
     elif any(a in ("--dry-run", "-d") for a in args):
         DRY_RUN = True
+        LOG_MODE = True
     else:
         # No flags given → fall back to interactive selection
         input_for_dry_run = input(
@@ -480,6 +512,9 @@ def main() -> None:
                         f"{skipped} skipped, {failed} failed.\n"
                         "   Try again later when YouTube resets your upload limit.\n"
                     )
+                    end_time = time.time()
+                    print(f"End time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(end_time))}")
+                    print(f"Total time: {end_time - start_time} seconds")
                     sys.exit(0)
 
             # Status 403 often means we hit YouTube's strict daily API quota limit
@@ -504,6 +539,9 @@ def main() -> None:
                         f"{skipped} skipped, {failed} failed.\n"
                         "   Run the script again tomorrow to resume.\n"
                     )
+                    end_time = time.time()
+                    print(f"End time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(end_time))}")
+                    print(f"Total time: {end_time - start_time} seconds")
                     sys.exit(0)
 
             print(f"   ❌  Upload failed (HTTP {err.resp.status}): {err}\n")
