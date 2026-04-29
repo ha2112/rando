@@ -1,0 +1,225 @@
+{
+  "AuthorIdsBlock": {
+    "content": {
+      "extra_data": "str",
+      "author_uuids": {
+        "1": {
+          "bytes": "str",
+          "bytes_le": "str",
+          "clock_seq": "int",
+          "clock_seq_hi_variant": "int",
+          "clock_seq_low": "int",
+          "fields": "list<int>",
+          "hex": "str",
+          "int": "int",
+          "is_safe": {},
+          "node": "int",
+          "time": "int",
+          "time_hi_version": "int",
+          "time_low": "int",
+          "time_mid": "int",
+          "urn": "str",
+          "variant": "str",
+          "version": "int"
+        }
+      }
+    }
+  },
+  "MigrationInfoBlock": {
+    "content": {
+      "extra_data": "str",
+      "migration_id": {
+        "part1": "int",
+        "part2": "int"
+      },
+      "is_device": "bool"
+    }
+  },
+  "PageInfoBlock": {
+    "content": {
+      "extra_data": "str",
+      "loads_count": "int",
+      "merges_count": "int",
+      "text_chars_count": "int",
+      "text_lines_count": "int",
+      "type_folio_use_count": "int"
+    }
+  },
+  "SceneInfo": {
+    "content": {
+      "extra_data": "str",
+      "current_layer": {
+        "timestamp": {
+          "part1": "int",
+          "part2": "int"
+        },
+        "value": {
+          "part1": "int",
+          "part2": "int"
+        }
+      },
+      "background_visible": {
+        "timestamp": {
+          "part1": "int",
+          "part2": "int"
+        },
+        "value": "bool"
+      },
+      "root_document_visible": {
+        "timestamp": {
+          "part1": "int",
+          "part2": "int"
+        },
+        "value": "bool"
+      }
+    }
+  },
+  "SceneTreeBlock": {
+    "content": {
+      "extra_data": "str",
+      "tree_id": {
+        "part1": "int",
+        "part2": "int"
+      },
+      "node_id": {
+        "part1": "int",
+        "part2": "int"
+      },
+      "is_update": "bool",
+      "parent_id": {
+        "part1": "int",
+        "part2": "int"
+      }
+    }
+  },
+  "TreeNodeBlock": {
+    "content": {
+      "extra_data": "str",
+      "group": {
+        "node_id": {
+          "part1": "int",
+          "part2": "int"
+        },
+        "children": {},
+        "label": {
+          "timestamp": {
+            "part1": "int",
+            "part2": "int"
+          },
+          "value": "str"
+        },
+        "visible": {
+          "timestamp": {
+            "part1": "int",
+            "part2": "int"
+          },
+          "value": "bool"
+        },
+        "anchor_id": "NoneType",
+        "anchor_type": "NoneType",
+        "anchor_threshold": "NoneType",
+        "anchor_origin_x": "NoneType"
+      }
+    }
+  },
+  "SceneGroupItemBlock": {
+    "content": {
+      "extra_data": "str",
+      "parent_id": {
+        "part1": "int",
+        "part2": "int"
+      },
+      "item": {
+        "item_id": {
+          "part1": "int",
+          "part2": "int"
+        },
+        "left_id": {
+          "part1": "int",
+          "part2": "int"
+        },
+        "right_id": {
+          "part1": "int",
+          "part2": "int"
+        },
+        "deleted_length": "int",
+        "value": {
+          "part1": "int",
+          "part2": "int"
+        }
+      },
+      "extra_value_data": "str"
+    },
+    "item_value": {
+      "part1": "int",
+      "part2": "int"
+    }
+  },
+  "SceneLineItemBlock": {
+    "content": {
+      "extra_data": "str",
+      "parent_id": {
+        "part1": "int",
+        "part2": "int"
+      },
+      "item": {
+        "item_id": {
+          "part1": "int",
+          "part2": "int"
+        },
+        "left_id": {
+          "part1": "int",
+          "part2": "int"
+        },
+        "right_id": {
+          "part1": "int",
+          "part2": "int"
+        },
+        "deleted_length": "int",
+        "value": {
+          "color": "PenColor",
+          "tool": "Pen",
+          "points": "list<Point>",
+          "thickness_scale": "float",
+          "starting_length": "float",
+          "move_id": "NoneType"
+        }
+      },
+      "extra_value_data": "str"
+    },
+    "item_value": {
+      "color": "PenColor",
+      "tool": "Pen",
+      "points": "list<Point>",
+      "thickness_scale": "float",
+      "starting_length": "float",
+      "move_id": "NoneType"
+    }
+  },
+  "SceneTombstoneItemBlock": {
+    "content": {
+      "extra_data": "str",
+      "parent_id": {
+        "part1": "int",
+        "part2": "int"
+      },
+      "item": {
+        "item_id": {
+          "part1": "int",
+          "part2": "int"
+        },
+        "left_id": {
+          "part1": "int",
+          "part2": "int"
+        },
+        "right_id": {
+          "part1": "int",
+          "part2": "int"
+        },
+        "deleted_length": "int",
+        "value": "NoneType"
+      },
+      "extra_value_data": "str"
+    }
+  }
+}

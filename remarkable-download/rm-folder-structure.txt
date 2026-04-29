@@ -1,0 +1,11 @@
+Root:
+~/.local/share/remarkable/xochitl/
+
+<doc_uuid>.metadata - Document info (name, parent folder, type)
+<doc_uuid>.content - Page list (ordered page UUIDs)
+<doc_uuid>.pagedata - Template/background per page
+<doc_uuid>.pdf (optional) - Original PDF (if imported)
+<doc_uuid>/ (directory) - <page_uuid>.rm → stroke data (one file per page)
+<doc_uuid>.thumbnails/ - <page_uuid>.png → page previews
+<doc_uuid>.textconversion/ - <page_uuid>.json → handwriting-to-text results
+
