@@ -141,8 +141,9 @@ def pen_color_to_rgb(color_int: int) -> Tuple[float, float, float]:
 
 # Known document UUIDs (user-defined references)
 UUIDS: list[str] = [
-    "c08b42a6-5be9-4517-9d63-38ae279538c2",  # graph of agent
-    "ac6c6386-7180-4d1e-aa5a-409c47135a3d",  # nhap copy
-    "18bb2b29-03a8-47d9-aa03-813a02e168ec",  # theory note art
-    "fcf5d7ba-95e1-421b-a7d8-e03f1d634897",  # piano helper
+    "c08b42a6-5be9-4517-9d63-38ae279538c2",     # graph of agent
+    "ac6c6386-7180-4d1e-aa5a-409c47135a3d",     # nhap copy
+    "18bb2b29-03a8-47d9-aa03-813a02e168ec",     # theory note art
+    "fcf5d7ba-95e1-421b-a7d8-e03f1d634897",     # piano helper
+    "4db1e9a6-4e7b-4e6a-a8dc-c9cbc1f907ca",     # learning multi agent coordination for enhancing target coverage in dns
 ]
