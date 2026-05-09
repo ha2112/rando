@@ -2,15 +2,17 @@ from pathlib import Path
 
 graph_of_agent_RM = "graph_of_agent_rm"
 nhap_rm = "nhap_rm"
+how_to_paper = "how_to_paper"
 
+how_to_paper_uuid = "2b683e50-82bf-425d-95a2-21dd7909c84f"
 nhap_uuid = "ac6c6386-7180-4d1e-aa5a-409c47135a3d"
 graph_of_agent_uuid = "c08b42a6-5be9-4517-9d63-38ae279538c2"  # Change to your target UUID
 
 # Destination directory is relative to the script location, NO home path hardcoded
-destination = Path(__file__).resolve().parent.parent / "remarkable-download" / nhap_rm
+destination = Path(__file__).resolve().parent.parent / "test_data" / how_to_paper
 
 mode = "hotspot"  # hotspot | home | usb
-uuid = nhap_uuid
+uuid = how_to_paper_uuid
 
 # Use str(destination) as the target; will not expand to a home directory
 script = f"""

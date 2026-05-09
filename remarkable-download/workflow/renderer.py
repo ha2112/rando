@@ -360,26 +360,67 @@ class PDFRenderer:
     # Private drawing helpers
     # ------------------------------------------------------------------
 
-    def _draw_stroke(self, page: fitz.Page, stroke: Stroke) -> None:
-        """Render a normal (non-highlight) stroke as an opaque polyline with rounded caps.
+    # ── helpers ───────────────────────────────────────────────────────────────
 
-        The line width is determined by:
-            max(MIN_LINE_WIDTH, BASE_LINE_WIDTH * stroke.width)
-
-        Args:
-            page:   The target fitz.Page instance.
-            stroke: A Stroke object with already scaled coordinates.
+    def _smooth_points(self, pts: list[fitz.Point], width: float) -> list[fitz.Point]:
         """
-   
-        r, g, b  = pen_color_to_rgb(stroke.color)
-        color    = (r, g, b)
-        width    = max(MIN_LINE_WIDTH, BASE_LINE_WIDTH * stroke.width)
-        pts      = [fitz.Point(pt.x, pt.y) for pt in stroke.points]
+        Catmull-Rom spline resampling for small-brush strokes.
+        Only applied when width is below a threshold; otherwise returns pts as-is.
+        Reduces micro-jitter without visibly altering the stroke shape.
+        """
+        SMOOTH_THRESHOLD = 2.0   # pt — tune to taste
+        MIN_POINTS = 4
+
+        if width >= SMOOTH_THRESHOLD or len(pts) < MIN_POINTS:
+            return pts
+
+        smoothed = [pts[0]]
+        for i in range(1, len(pts) - 2):
+            p0, p1, p2, p3 = pts[i-1], pts[i], pts[i+1], pts[i+2]
+            # Catmull-Rom tangents → cubic Bézier control points
+            c1 = fitz.Point(p1.x + (p2.x - p0.x) / 6, p1.y + (p2.y - p0.y) / 6)
+            c2 = fitz.Point(p2.x - (p3.x - p1.x) / 6, p2.y - (p3.y - p1.y) / 6)
+            # Evaluate at t=0.5 as an extra interpolated point
+            mid = fitz.Point(
+                0.125*p0.x + 0.375*p1.x + 0.375*p2.x + 0.125*p3.x,
+                0.125*p0.y + 0.375*p1.y + 0.375*p2.y + 0.125*p3.y,
+            )
+            smoothed.extend([c1, mid, c2])
+        smoothed.append(pts[-1])
+        return smoothed
+
+
+    # ── replace _draw_stroke ───────────────────────────────────────────────────
+
+    def _draw_stroke(self, page: fitz.Page, stroke: Stroke) -> None:
+        """Render a normal stroke as an opaque polyline with round caps AND round joins.
+
+        Migrated from page.draw_polyline() to shape-based drawing so that lineJoin=1
+        (round) can be applied. Without round joins, segment junctions produce sharp
+        miter spikes that are visually prominent on thin/small-brush strokes.
+
+        For small widths an optional Catmull-Rom smoothing pass is applied first to
+        reduce micro-jitter from closely sampled stylus points.
+        """
+        r, g, b = pen_color_to_rgb(stroke.color)
+        color   = (r, g, b)
+        width   = max(MIN_LINE_WIDTH, BASE_LINE_WIDTH * stroke.width)
+        pts     = [fitz.Point(pt.x, pt.y) for pt in stroke.points]
+        pts     = self._smooth_points(pts, width)   # no-op for large brushes
 
         try:
-            page.draw_polyline(pts, color=color, width=width, lineCap=1)
+            shape = page.new_shape()
+            shape.draw_polyline(pts)
+            shape.finish(
+                color=color,
+                width=width,
+                lineCap=1,    # 0=butt  1=round  2=square
+                lineJoin=1,   # 0=miter 1=round  2=bevel  ← the key fix
+                closePath = False,
+            )
+            shape.commit()
         except Exception as exc:
-            log.warning("draw_polyline failed on page (normal stroke): %s", exc)
+            log.warning("draw_stroke failed: %s", exc)
 
     def _draw_highlight(self, page: fitz.Page, stroke: Stroke) -> None:
         """Render a highlighter stroke as a wide, semi-transparent polyline.
@@ -408,6 +449,7 @@ class PDFRenderer:
                 stroke_opacity=HIGHLIGHT_OPACITY_BLEND,
                 blend_mode="Multiply",
                 lineCap=1,
+                closePath = False,
             )
             shape.commit()
             return
@@ -424,6 +466,7 @@ class PDFRenderer:
                 width=width,
                 stroke_opacity=HIGHLIGHT_OPACITY_PLAIN, 
                 lineCap=1,
+                closePath = False,
             )
             shape.commit()
         except Exception as exc:
@@ -478,6 +521,7 @@ class PDFRenderer:
                 color=None,           # no border stroke, fill only
                 fill_opacity=HIGHLIGHT_OPACITY_BLEND,
                 blend_mode="Multiply",
+                closePath = False,
             )
             shape.commit()
             return
@@ -500,6 +544,7 @@ class PDFRenderer:
                 fill=color,
                 color=None,
                 fill_opacity=HIGHLIGHT_OPACITY_PLAIN,
+                closePath = False,
             )
             shape.commit()
         except Exception as exc:

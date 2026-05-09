@@ -88,8 +88,8 @@ RM_HALF_WIDTH: float = RM_WIDTH / 2.0
 # =============================================================================================================================
 
 # Line width
-BASE_LINE_WIDTH: float = 1.5
-MIN_LINE_WIDTH: float = 1.0
+BASE_LINE_WIDTH: float = 0.5
+MIN_LINE_WIDTH: float = 0.7
 
 # Highlight opacity
 HIGHLIGHT_OPACITY_BLEND: float = 0.75
