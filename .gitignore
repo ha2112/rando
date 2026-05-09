@@ -150,4 +150,4 @@ uploaded_files.json
 
 uuid_index.json
 
-./test-data/*
+test_data/
