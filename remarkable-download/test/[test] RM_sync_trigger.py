@@ -103,8 +103,10 @@ def trigger_sync(uuid):
     data = json.loads(raw)
 
     now_ms = str(int(time.time() * 1000))
+    open_now_ms = str(int(time.time() * 1000 - 12000))
 
     data["lastModified"] = now_ms
+    data["lastOpened"] = open_now_ms 
     # data["modified"] = True
     data["synced"] = False
     # data["version"] = data.get("version", 0) + 1
@@ -115,12 +117,12 @@ def trigger_sync(uuid):
     ssh_write(host, metadata_path, updated)
 
     print("[+] Sync trigger updated successfully")
-    print(f"    version       = {data['version']}")
+    # print(f"    version       = {data['version']}")
     print(f"    lastModified  = {now_ms}")
+    print(f"    lastOpened  = {open_now_ms}")
 
 
 if __name__ == "__main__":
     # Replace with your document UUID
-    UUID = "2b683e50-82bf-425d-95a2-21dd7909c84f" # how to paper
-
+    UUID = "3eb07d71-45a5-427a-a0ef-8981489092a2" # test trigger
     trigger_sync(UUID)
