@@ -146,4 +146,5 @@ UUIDS: list[str] = [
     "18bb2b29-03a8-47d9-aa03-813a02e168ec",     # theory note art
     "fcf5d7ba-95e1-421b-a7d8-e03f1d634897",     # piano helper
     "4db1e9a6-4e7b-4e6a-a8dc-c9cbc1f907ca",     # learning multi agent coordination for enhancing target coverage in dns
+    "4c4df02c-0609-401f-8278-36f500b0b35e",     # Anthropic's paper about natural language autoencoder
 ]
