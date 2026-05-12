@@ -32,9 +32,10 @@ PROFILES: dict[str, str] = {
     "usb": "remarkable-usb",
     "home": "remarkable-home",
     "hotspot": "remarkable-hotspot",
+    "wifi-hust-b1": "remarkable-wifi-hust-b1"
 }
 
-PROFILE_ORDER: list[str] = ["hotspot", "home", "usb"]
+PROFILE_ORDER: list[str] = ["hotspot", "home", "wifi-hust-b1", "usb"]
 
 # Manual override (optional)
 MANUAL_HOST: str | None = None
@@ -70,26 +71,23 @@ for directory in (DONE_DIR, LOG_DIR, TEMPLATE_DIR):
 # CANVAS CONFIGURATION
 # =============================================================================================================================
 
-# Calibration factor used to fine-tune the effective canvas resolution.
-# Adjust this value if stroke alignment or scaling appears incorrect.
-_X_FACTOR: float = 0.0
-
-# Base portrait canvas dimensions (units ≈ PDF points at 72 DPI)
-RM_WIDTH: float = 1920.0 - (_X_FACTOR * 3)
-RM_HEIGHT: float = 2560.0 - (_X_FACTOR * 4)
+RM_WIDTH: float = 1920.0 
+RM_HEIGHT: float = 2560.0 
 
 # Derived dimensions
 BLANK_PAGE_WIDTH_PT: float = RM_WIDTH
 BLANK_PAGE_HEIGHT_PT: float = RM_HEIGHT
-RM_HALF_WIDTH: float = RM_WIDTH/2.0 #- 47.0
-RM_HEIGHT_OFFSET: float = - RM_HEIGHT/512.0 #+ 45.0
+RM_HALF_WIDTH: float = RM_WIDTH/2.0 
+RM_HEIGHT_OFFSET: float = 0
+
+SCALE: float = 349.0 / 1100.0
 
 # =============================================================================================================================
 # PEN RENDERING CONFIGURATION
 # =============================================================================================================================
 
 # Line width
-BASE_LINE_WIDTH: float = 0.5
+BASE_LINE_WIDTH: float = 0.1
 MIN_LINE_WIDTH: float = 0.7
 
 # Highlight opacity
@@ -147,8 +145,8 @@ UUIDS: list[str] = [
     # "18bb2b29-03a8-47d9-aa03-813a02e168ec",     # theory note art
     # "fcf5d7ba-95e1-421b-a7d8-e03f1d634897",     # piano helper
     # "4db1e9a6-4e7b-4e6a-a8dc-c9cbc1f907ca",     # learning multi agent coordination for enhancing target coverage in dns
-    # "4c4df02c-0609-401f-8278-36f500b0b35e",     # Anthropic's paper about natural language autoencoder
-    # "2b683e50-82bf-425d-95a2-21dd7909c84f",     # how to paper
-    "886c158f-84d5-40ba-9958-b081cb792cb9",     # CGM code graph model
-    "1294ca90-df87-48de-8c11-d24d1d80cfde",     # attention is all you need
+    "4c4df02c-0609-401f-8278-36f500b0b35e",     # Anthropic's paper about natural language autoencoder
+    "2b683e50-82bf-425d-95a2-21dd7909c84f",     # how to paper
+    # "886c158f-84d5-40ba-9958-b081cb792cb9",     # CGM code graph model
+    # "1294ca90-df87-48de-8c11-d24d1d80cfde",     # attention is all you need     
 ]

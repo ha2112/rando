@@ -199,18 +199,20 @@ GOA_FIRST_PAGE_UUID: str = "9d966e03-3330-47f3-bc61-e884cf9450a9"
 GOA_SEVENTH_PAGE_UUID: str = "3c09a2b4-2925-45c0-ae47-627e5c2360b4"
 
 NHAP_FIRST_PAGE_UUID: str = "1e323c02-c480-48b9-bfdb-33aef3d076a4"
-
+PIANO_HELPER_SECOND_PAGE: str = "1ad00102-2d0c-4b3c-b4b4-c65d85cf32b4"
 # Folder structure (relative, not absolute)
 GRAPH_OF_AGENT_DIR: Path = Path("graph_of_agent_RM") / "c08b42a6-5be9-4517-9d63-38ae279538c2"
 NHAP_DIR: Path = Path("nhap_rm") / "ac6c6386-7180-4d1e-aa5a-409c47135a3d"
-
+PIANO_HELPER_DIR: str = "fcf5d7ba-95e1-421b-a7d8-e03f1d634897"
+HOW_TO_PAPER_DIR: Path = Path("how_to_paper") / "2b683e50-82bf-425d-95a2-21dd7909c84f"
+HOW_TO_PAPER_FIRST_PAGE: str = "463a9ef3-acad-4c5d-81f9-5e0ee9304b78"
 
 # =============================================================================================================================
 # BASE PATH (NO HARDCODED HOME)
 # =============================================================================================================================
 
 # Option 1 (recommended): project-relative
-BASE_DIR: Path = Path(__file__).resolve().parent / "remarkable-download"
+BASE_DIR: Path = Path(__file__).resolve().parent.parent  / "test_data" 
 
 # Option 2 (alternative): configurable via env
 # import os
@@ -221,9 +223,11 @@ BASE_DIR: Path = Path(__file__).resolve().parent / "remarkable-download"
 # PATH RESOLUTION
 # =============================================================================================================================
 
-rm_file_path: Path = BASE_DIR / NHAP_DIR / f"{NHAP_FIRST_PAGE_UUID}.rm"
-json_output_path: Path = BASE_DIR / "dump.json"
-image_output_path: Path = BASE_DIR / "test_render.png"
+rm_dir = HOW_TO_PAPER_DIR
+rm_file = HOW_TO_PAPER_FIRST_PAGE + ".rm"
+rm_file_path: Path = BASE_DIR / rm_dir / rm_file
+# json_output_path: Path = BASE_DIR / "dump.json"
+# image_output_path: Path = BASE_DIR / "test_render.png"
 
 
 # =============================================================================================================================

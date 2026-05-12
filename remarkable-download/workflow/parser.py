@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pymupdf import r
 
-from config import RM_HEIGHT, RM_HALF_WIDTH, RM_WIDTH, RM_HEIGHT_OFFSET
+from config import RM_HEIGHT, RM_HALF_WIDTH, RM_WIDTH, RM_HEIGHT_OFFSET, SCALE
 from models import DocumentMeta, PageInfo, Stroke, Highlight, Point, Rectangle
 
 log = logging.getLogger("rm-rebuilder.parser")
@@ -290,17 +290,15 @@ class StrokeProcessor:
         """
    
         if is_pdf_page:
-            scale1: float = target_width_pt / RM_WIDTH
-            scale2: float  = target_height_pt / RM_HEIGHT
-            scale = max(scale1, scale2)
+            scale = SCALE
             sx = scale
             sy = scale
+            x_rm_offset = target_width_pt / scale / 2 
         else:
             # Notebook: independent per-axis scale fills the blank page.
             sx = target_width_pt  / RM_WIDTH
             sy = target_height_pt / RM_HEIGHT
-        x_rm_offset: float = RM_HALF_WIDTH
-        y_rm_offset: float = RM_HEIGHT_OFFSET
+            x_rm_offset: float = RM_HALF_WIDTH
 
         scaled: List[Stroke] = []
         for s in strokes:
@@ -312,7 +310,7 @@ class StrokeProcessor:
                 x_final  = x_scaled + x_origin_pt  # bug fix #2: CropBox offset
 
                 # ── y pipeline ───────────────────────────────────────────────
-                y_scaled = (pt.y + y_rm_offset) * sy  # apply configured vertical calibration offset
+                y_scaled = pt.y * sy  # y offset removed
                 y_final  = y_scaled + y_origin_pt  # bug fix #2: CropBox offset
 
                 # Pressure is a sensor reading, not a coordinate — pass through.
@@ -327,36 +325,36 @@ class StrokeProcessor:
             ))
 
         # -- DEBUG: Add border stroke and middle vertical guide --
-        border_points = [
-            Point(x=x_origin_pt, y=y_origin_pt, pressure=1.0),
-            Point(x=x_origin_pt + target_width_pt, y=y_origin_pt, pressure=1.0),
-            Point(x=x_origin_pt + target_width_pt, y=y_origin_pt + target_height_pt, pressure=1.0),
-            Point(x=x_origin_pt, y=y_origin_pt + target_height_pt, pressure=1.0),
-            Point(x=x_origin_pt, y=y_origin_pt, pressure=1.0),  # Close the rectangle
-        ]
-        border_stroke = Stroke(
-            tool=18,  # or an arbitrary tool for debug
-            color=1,   # distinguishable color for debug
-            width=1.0,     # make it a thin but visible border
-            points=border_points,
-            block_index=-1
-        )
-        scaled.append(border_stroke)
+        # border_points = [
+        #     Point(x=x_origin_pt, y=y_origin_pt, pressure=1.0),
+        #     Point(x=x_origin_pt + target_width_pt, y=y_origin_pt, pressure=1.0),
+        #     Point(x=x_origin_pt + target_width_pt, y=y_origin_pt + target_height_pt, pressure=1.0),
+        #     Point(x=x_origin_pt, y=y_origin_pt + target_height_pt, pressure=1.0),
+        #     Point(x=x_origin_pt, y=y_origin_pt, pressure=1.0),  # Close the rectangle
+        # ]
+        # border_stroke = Stroke(
+        #     tool=18,  # or an arbitrary tool for debug
+        #     color=1,   # distinguishable color for debug
+        #     width=1.0,     # make it a thin but visible border
+        #     points=border_points,
+        #     block_index=-1
+        # )
+        # scaled.append(border_stroke)
 
-        # Add a vertical stroke down the middle
-        mid_x = x_origin_pt + target_width_pt / 2
-        vertical_points = [
-            Point(x=mid_x, y=y_origin_pt, pressure=1.0),
-            Point(x=mid_x, y=y_origin_pt + target_height_pt, pressure=1.0)
-        ]
-        middle_stroke = Stroke(
-            tool=18,    # same debug tool
-            color=2,    # another distinguishable color for guide
-            width=1.0,
-            points=vertical_points,
-            block_index=-1
-        )
-        scaled.append(middle_stroke)
+        # # Add a vertical stroke down the middle
+        # mid_x = x_origin_pt + target_width_pt / 2
+        # vertical_points = [
+        #     Point(x=mid_x, y=y_origin_pt, pressure=1.0),
+        #     Point(x=mid_x, y=y_origin_pt + target_height_pt, pressure=1.0)
+        # ]
+        # middle_stroke = Stroke(
+        #     tool=18,    # same debug tool
+        #     color=2,    # another distinguishable color for guide
+        #     width=1.0,
+        #     points=vertical_points,
+        #     block_index=-1
+        # )
+        # scaled.append(middle_stroke)
 
         return scaled
 
@@ -388,17 +386,15 @@ class StrokeProcessor:
         """
    
         if is_pdf_page:
-            scale1 = target_width_pt / RM_WIDTH
-            scale2 = target_height_pt / RM_HEIGHT
-            scale = max(scale1, scale2)
+            scale = SCALE
             sx = scale
             sy = scale
+            x_rm_offset = target_width_pt / scale / 2.0 
         else:
             # Notebook: independent per-axis scale fills the blank page.
             sx = target_width_pt  / RM_WIDTH
             sy = target_height_pt / RM_HEIGHT
-        x_rm_offset: float = RM_HALF_WIDTH
-        y_rm_offset: float = RM_HEIGHT_OFFSET
+            x_rm_offset: float = RM_HALF_WIDTH
 
         scaled: List[Highlight] = []
         for h in highlights:
@@ -406,7 +402,7 @@ class StrokeProcessor:
             for r in h.rectangles:
                 # Transform rectangle origin
                 x_final = (r.x + x_rm_offset) * sx + x_origin_pt
-                y_final = (r.y + y_rm_offset) * sy + y_origin_pt
+                y_final = r.y * sy + y_origin_pt  # y offset removed
          
                 w_final = r.w * sx
                 h_final = r.h * sy
