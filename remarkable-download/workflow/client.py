@@ -194,7 +194,7 @@ class RMClient:
             self._scp.close()
         if self._ssh:
             self._ssh.close()
-        log.info("Disconnected.")
+        log.info("✂️🔌✂️🔌✂️🔌✂️🔌✂️🔌 Disconnected. ✂️🔌✂️🔌✂️🔌✂️🔌✂️🔌")
 
     #=====================================================
     # Remote file operations

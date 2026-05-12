@@ -81,13 +81,17 @@ class PDFRenderer:
         if is_pdf_page:
             src_page = base_doc[page_info.redir]
             crop = src_page.cropbox
-            crop_pos = src_page.cropbox_position
 
             target_w = float(crop.width)
             target_h = float(crop.height)
 
-            x_origin = float(crop_pos.x)
-            y_origin = float(crop_pos.y)
+            x_origin = float(crop.x0)
+            y_origin = float(crop.y0)
+
+            print(f"📝📝📝 PDF Crop box: {crop}")
+            print(f"📝📝📝 Target dimensions (w, h): ({target_w}, {target_h})")
+            print(f"📝📝📝 Origin (x0, y0): ({x_origin}, {y_origin})")
+       
         else:
             target_w = BLANK_PAGE_WIDTH_PT
             target_h = BLANK_PAGE_HEIGHT_PT

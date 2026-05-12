@@ -156,7 +156,7 @@ def _process_document(
             stroke_provider=make_stroke_provider(processor, work_dir, doc_uuid),
         )
         renderer.save(out_path)
-        log.info("  Saved → %s", out_path)
+        log.info("  ✅ Saved → %s", out_path)
 
     finally:
         renderer.close()

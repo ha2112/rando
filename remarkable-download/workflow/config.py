@@ -34,7 +34,7 @@ PROFILES: dict[str, str] = {
     "hotspot": "remarkable-hotspot",
 }
 
-PROFILE_ORDER: list[str] = ["usb", "home", "hotspot"]
+PROFILE_ORDER: list[str] = ["hotspot", "home", "usb"]
 
 # Manual override (optional)
 MANUAL_HOST: str | None = None
@@ -81,7 +81,8 @@ RM_HEIGHT: float = 2560.0 - (_X_FACTOR * 4)
 # Derived dimensions
 BLANK_PAGE_WIDTH_PT: float = RM_WIDTH
 BLANK_PAGE_HEIGHT_PT: float = RM_HEIGHT
-RM_HALF_WIDTH: float = RM_WIDTH / 2.0
+RM_HALF_WIDTH: float = RM_WIDTH/2.0 #- 47.0
+RM_HEIGHT_OFFSET: float = - RM_HEIGHT/512.0 #+ 45.0
 
 # =============================================================================================================================
 # PEN RENDERING CONFIGURATION
@@ -141,10 +142,13 @@ def pen_color_to_rgb(color_int: int) -> Tuple[float, float, float]:
 
 # Known document UUIDs (user-defined references)
 UUIDS: list[str] = [
-    "c08b42a6-5be9-4517-9d63-38ae279538c2",     # graph of agent
-    "ac6c6386-7180-4d1e-aa5a-409c47135a3d",     # nhap copy
-    "18bb2b29-03a8-47d9-aa03-813a02e168ec",     # theory note art
-    "fcf5d7ba-95e1-421b-a7d8-e03f1d634897",     # piano helper
-    "4db1e9a6-4e7b-4e6a-a8dc-c9cbc1f907ca",     # learning multi agent coordination for enhancing target coverage in dns
-    "4c4df02c-0609-401f-8278-36f500b0b35e",     # Anthropic's paper about natural language autoencoder
+    # "c08b42a6-5be9-4517-9d63-38ae279538c2",     # graph of agent
+    # "ac6c6386-7180-4d1e-aa5a-409c47135a3d",     # nhap copy
+    # "18bb2b29-03a8-47d9-aa03-813a02e168ec",     # theory note art
+    # "fcf5d7ba-95e1-421b-a7d8-e03f1d634897",     # piano helper
+    # "4db1e9a6-4e7b-4e6a-a8dc-c9cbc1f907ca",     # learning multi agent coordination for enhancing target coverage in dns
+    # "4c4df02c-0609-401f-8278-36f500b0b35e",     # Anthropic's paper about natural language autoencoder
+    # "2b683e50-82bf-425d-95a2-21dd7909c84f",     # how to paper
+    "886c158f-84d5-40ba-9958-b081cb792cb9",     # CGM code graph model
+    "1294ca90-df87-48de-8c11-d24d1d80cfde",     # attention is all you need
 ]
