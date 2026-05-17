@@ -21,6 +21,15 @@ from pymupdf import r
 from config import RM_HEIGHT, RM_HALF_WIDTH, RM_WIDTH, RM_HEIGHT_OFFSET, SCALE
 from models import DocumentMeta, PageInfo, Stroke, Highlight, Point, Rectangle
 
+try:
+    import rmscene  # type: ignore[import]
+except ImportError:
+    raise ImportError(
+        "The 'rmscene' package is required.  Install with:\n"
+        "    pip install rmscene"
+    )
+
+
 log = logging.getLogger("rm-rebuilder.parser")
 
 # ======================================================================================
@@ -76,43 +85,82 @@ class DocumentParser:
       )
 
     def parse_pages(self) -> List[PageInfo]:
-      """ Parse the ``<uuid>.content`` file and return pages in CRDT order.
+        content_file = self.work_dir / f"{self.doc_uuid}.content"
+        if not content_file.exists():                        # fix the missing ()
+            raise FileNotFoundError(f"Content file not found: {content_file}")
 
-      Returns:
-        Ordered :class:`list` of :class:`~models.PageInfo` objects
-      """
+        with content_file.open("r", encoding="utf-8") as fh:
+            data: Dict[str, Any] = json.load(fh)
 
-      content_file = self.work_dir / f"{self.doc_uuid}.content"
-      if not content_file.exists:
-        raise FileNotFoundError(f"Content file not found: {content_file}")
-
-      with content_file.open("r", encoding="utf-8") as fh:
-        data: Dict[str, Any] = json.load(fh)
-
-      cpages = data.get("cPages", {})
-      raw_pages = cpages.get("pages", [])
-      
-      pages: List[PageInfo] = []
-      for i,p in enumerate[Any](raw_pages):
-        # Skip deleted pages
-        is_deleted = p.get("deleted", False) or p.get("deletedLength", 0) > 0
-        if is_deleted:
-          log.debug("Skipping deleted page at CRDT index %d (uuid: %s)", i, p.get("id"))
-          continue
-        
         orientation = data.get("orientation", "portrait")
-        redir_raw = self._unwrap(p.get("redir"))
-        pages.append(PageInfo(
-          page_number=i,  # Keeps original CRDT array index for reference
-          uuid=p.get("id", ""),
-          redir=self._safe_int(redir_raw),
-          template=self._unwrap(p.get("template")),
-          modified=self._safe_int(p.get("modifed")),
-          orientation=orientation, 
-        ))
-      
-      log.debug("Parsed %d active pages in CRDT order.", len(pages))
-      return pages
+
+        # ── Format A: current firmware (cPages CRDT structure) ──────────────────
+        if "cPages" in data:
+            cpages    = data["cPages"]
+            raw_pages = cpages.get("pages", [])
+            # guard against {"value": [...]} wrapper on the pages array itself
+            raw_pages = self._unwrap(raw_pages)
+            return self._parse_cpages_format(raw_pages, orientation)
+
+        # ── Format B: legacy firmware (flat pages array + redirectionPageMap) ───
+        if "pages" in data:
+            log.debug(
+                "%s uses legacy flat-pages format — applying redirectionPageMap.",
+                self.doc_uuid,
+            )
+            return self._parse_legacy_format(data, orientation)
+
+        log.warning("%s: unrecognised .content structure — no pages found.", self.doc_uuid)
+        return []
+
+
+    def _parse_cpages_format(
+        self,
+        raw_pages: List[Any],
+        orientation: str,
+    ) -> List[PageInfo]:
+        """Parse the current cPages CRDT format."""
+        pages: List[PageInfo] = []
+        for i, p in enumerate(raw_pages):
+            is_deleted = p.get("deleted", False) or p.get("deletedLength", 0) > 0
+            if is_deleted:
+                log.debug("Skipping deleted page at CRDT index %d (uuid: %s)", i, p.get("id"))
+                continue
+            pages.append(PageInfo(
+                page_number = i,
+                uuid        = p.get("id", ""),
+                redir       = self._safe_int(self._unwrap(p.get("redir"))),
+                template    = self._unwrap(p.get("template")),
+                modified    = self._safe_int(p.get("modified")),
+                orientation = orientation,
+            ))
+        log.debug("Parsed %d active pages (cPages format).", len(pages))
+        return pages
+
+
+    def _parse_legacy_format(
+        self,
+        data: Dict[str, Any],
+        orientation: str,
+    ) -> List[PageInfo]:
+        """Parse the legacy flat pages + redirectionPageMap format."""
+        page_uuids   = data.get("pages", [])
+        redir_map    = data.get("redirectionPageMap", [])
+
+        pages: List[PageInfo] = []
+        for i, uuid in enumerate(page_uuids):
+            redir = redir_map[i] if i < len(redir_map) else None
+            # legacy format has no per-page deletion markers
+            pages.append(PageInfo(
+                page_number = i,
+                uuid        = uuid,
+                redir       = self._safe_int(redir),
+                template    = None,
+                modified    = None,
+                orientation = orientation,
+            ))
+        log.debug("Parsed %d pages (legacy format).", len(pages))
+        return pages
     
     # =========================================================
     # Helper
@@ -201,13 +249,6 @@ class StrokeProcessor:
             log.warning("Missing .rm file — treating as blank page: %s", rm_path)
             return [], []
 
-        try:
-            import rmscene  # type: ignore[import]
-        except ImportError:
-            raise ImportError(
-                "The 'rmscene' package is required.  Install with:\n"
-                "    pip install rmscene"
-            )
 
         try:
             with rm_path.open("rb") as fh:

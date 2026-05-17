@@ -87,8 +87,8 @@ SCALE: float = 349.0 / 1100.0
 # =============================================================================================================================
 
 # Line width
-BASE_LINE_WIDTH: float = 0.1
-MIN_LINE_WIDTH: float = 0.7
+BASE_LINE_WIDTH: float = 1.0
+MIN_LINE_WIDTH: float = 1.0
 
 # Highlight opacity
 HIGHLIGHT_OPACITY_BLEND: float = 0.75
@@ -114,6 +114,7 @@ HIGHLIGHT_COLOR_POOL: list[Tuple[float, float, float]] = [
     (1.0, 0.60, 0.80),   # Light pink
     (1.0, 0.50, 0.00),   # Orange
     (0.10, 0.78, 0.78),  # Teal
+    (0.75, 0.75, 0.75),  # Gray
 ]
 
 def pen_color_to_rgb(color_int: int) -> Tuple[float, float, float]:
@@ -145,8 +146,8 @@ UUIDS: list[str] = [
     # "18bb2b29-03a8-47d9-aa03-813a02e168ec",     # theory note art
     # "fcf5d7ba-95e1-421b-a7d8-e03f1d634897",     # piano helper
     # "4db1e9a6-4e7b-4e6a-a8dc-c9cbc1f907ca",     # learning multi agent coordination for enhancing target coverage in dns
-    "4c4df02c-0609-401f-8278-36f500b0b35e",     # Anthropic's paper about natural language autoencoder
-    "2b683e50-82bf-425d-95a2-21dd7909c84f",     # how to paper
+    # "4c4df02c-0609-401f-8278-36f500b0b35e",     # Anthropic's paper about natural language autoencoder
+    # "2b683e50-82bf-425d-95a2-21dd7909c84f",     # how to paper
     # "886c158f-84d5-40ba-9958-b081cb792cb9",     # CGM code graph model
     # "1294ca90-df87-48de-8c11-d24d1d80cfde",     # attention is all you need     
 ]

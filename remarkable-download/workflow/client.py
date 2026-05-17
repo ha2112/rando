@@ -1,362 +1,339 @@
 """
 client.py
 =========
-SSH / SCP transport layer for communicating with the reMarkable tablet.
+rsync-based transport layer for the rm-rebuilder pipeline.
 
-Two classes:
+Replaces the former paramiko/scp implementation entirely.  All remote
+communication is delegated to the system ``rsync`` binary, which resolves
+SSH aliases from ``~/.ssh/config`` automatically.
 
-* :class:`RMClient`      — low-level SSH connection wrapper (Paramiko + SCP).
-* :class:`FileDownloader` — high-level per-document asset downloader that
-  uses an :class:`RMClient` to pull exactly the files needed for one rebuild.
+Two classes
+-----------
+* :class:`RsyncClient`    — low-level rsync wrapper around ``subprocess``.
+* :class:`FileDownloader` — high-level document-level sync (selective mode).
+
+Sync modes
+----------
+Full sync
+    A single ``rsync`` of the entire ``xochitl/`` directory into the cache.
+    Fastest for first-time mirrors or "sync everything" workflows.  Invoked
+    via :meth:`RsyncClient.full_sync`.
+
+Selective sync
+    Per-document rsync calls for only the UUIDs requested.  Faster for
+    targeted refreshes when the full library is large.  Invoked via
+    :meth:`FileDownloader.download_all`.
+
+SSH alias convention
+--------------------
+Both modes expect SSH aliases in ``~/.ssh/config`` that match the strings
+stored in ``config.PROFILES``.  The POC used ``remarkable-{mode}``; whatever
+names are in PROFILES work as long as the corresponding ``Host`` entry exists::
+
+    Host remarkable-usb
+        HostName 10.11.99.1
+        User root
+        IdentityFile ~/.ssh/id_rsa_remarkable
+
+Dependencies
+------------
+``rsync`` must be on ``$PATH`` (standard on macOS and most Linux distros).
+No Python networking packages are required.
 """
 from __future__ import annotations
 
 import logging
-import os
+import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
-
-import io
-import json
-import logging
-import re
-import sys
-from pathlib import Path
-from typing import TYPE_CHECKING
-
-import paramiko
-from scp import SCPClient
+from typing import List, Optional, Sequence
 
 from config import (
-    RM_ROOT,
-    SSH_BANNER_TIMEOUT,
-    SSH_CONNECT_TIMEOUT,
-    SCP_TIMEOUT,
-    PROFILES,
     PROFILE_ORDER,
-    MANUAL_HOST,
-    MANUAL_USER,
-    MANUAL_PASSWORD,
-    MANUAL_SSH_KEY,
-    MANUAL_PORT,
+    PROFILES,
+    RM_ROOT,
 )
 
 log = logging.getLogger("rm-rebuilder.client")
 
 
 # ---------------------------------------------------------------------------
-# RMClient
+# Helpers
 # ---------------------------------------------------------------------------
 
-class RMClient:
-    """SSH/SCP interface to the reMarkable tablet.
+def resolve_alias(mode: Optional[str]) -> str:
+    """Map a profile *mode* name to the SSH alias string from ``config.PROFILES``.
 
-    Wraps a :class:`paramiko.SSHClient` and an :class:`scp.SCPClient`.
-    Read the ~/.ssh/config file and connect, fallback to hardcoded config if NONE is found
+    If *mode* is ``None``, returns the first alias in ``config.PROFILE_ORDER``
+    (auto-order fallback).
+
+    Args:
+        mode: Profile key (e.g. ``"usb"``, ``"home"``, ``"hotspot"``), or
+              ``None`` to use the first configured profile.
+
+    Returns:
+        SSH alias string (e.g. ``"remarkable-usb"``).
+
+    Raises:
+        ValueError: When *mode* is given but not found in ``config.PROFILES``.
+    """
+    if mode is None:
+        return PROFILES[PROFILE_ORDER[0]]
+
+    if mode not in PROFILES:
+        raise ValueError(
+            f"Unknown profile {mode!r}. "
+            f"Valid options: {sorted(PROFILES)}"
+        )
+    return PROFILES[mode]
+
+
+# ---------------------------------------------------------------------------
+# RsyncClient
+# ---------------------------------------------------------------------------
+
+class RsyncClient:
+    """Low-level rsync wrapper that delegates all I/O to the system binary.
+
+    Every transfer ultimately calls :meth:`_rsync`, which builds a
+    ``subprocess`` command and streams rsync's output to the terminal.
 
     Attributes:
-        username:   SSH login username (default ``"root"``).
-        password:   SSH password; ``None`` for key-based authentication.
-        key_path:   Path to an SSH private key file in PEM or OpenSSH format.
+        cache_dir: Root of the persistent local cache (``.RM_FILES/``).
+                   All downloaded files land here in a flat xochitl-mirror
+                   layout.
+        alias:     SSH alias to prefix remote paths (e.g. ``remarkable-usb``).
 
     Example::
 
-        client = RMClient()
-        client.connect()
-        client.download("/home/root/.../file.rm", "/tmp/file.rm")
-        client.disconnect()
+        client = RsyncClient(cache_dir=Path(".RM_FILES"), alias="remarkable-usb")
+        client.full_sync()                          # mirror all of xochitl/
+        # — or —
+        client.selective_sync(["uuid1", "uuid2"])   # only specific docs
     """
-    def __init__(
+
+    def __init__(self, cache_dir: Path, alias: str) -> None:
+        self.cache_dir = cache_dir
+        self.alias = alias
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # Core primitive
+    # ------------------------------------------------------------------
+
+    def _rsync(
         self,
-        username: str = "root",
-        password: Optional[str] = None,
-        key_path: Optional[str] = None,
-    ) -> None:
-        self.username   = username
-        self.password   = password
-        self.key_path   = key_path
+        src: str,
+        dst: Path,
+        *,
+        extra_flags: Sequence[str] = (),
+        optional: bool = False,
+    ) -> bool:
+        """Execute a single rsync transfer.
 
-        self._ssh: Optional[paramiko.SSHClient] = None
-        self._scp: Optional[SCPClient]          = None
+        Constructs::
 
-    def _ensure_connected(self) -> None:
-        """Raise a clear error if SSH/SCP handles are not initialized."""
-        if self._ssh is None or self._scp is None:
-            raise RuntimeError(
-                "RMClient is not connected. Call connect() before remote file operations."
+            rsync -avz --progress [extra_flags] <src> <dst>
+
+        Args:
+            src:         Full rsync source (``alias:remote/path`` or local path).
+            dst:         Local destination directory or file path.
+            extra_flags: Any additional rsync flags (e.g. ``["--delete"]``).
+            optional:    If ``True``, a non-zero exit code is silently swallowed
+                         and ``False`` is returned.  Use for files that may be
+                         absent on the tablet (e.g. ``.pdf``, ``.pagedata``).
+
+        Returns:
+            ``True`` on success, ``False`` when *optional* is ``True`` and the
+            transfer fails.
+
+        Raises:
+            subprocess.CalledProcessError: When *optional* is ``False`` and
+                rsync exits non-zero.
+        """
+        cmd: List[str] = [
+            "rsync",
+            "-avz",
+            "--progress",
+            *extra_flags,
+            src,
+            str(dst),
+        ]
+        log.info("  rsync %s → %s", src, dst)
+        log.debug("  full cmd: %s", " ".join(cmd))
+
+        try:
+            subprocess.run(cmd, check=True)
+            return True
+        except subprocess.CalledProcessError as exc:
+            if optional:
+                log.debug("Skipped (absent or transfer error): %s — exit %d", src, exc.returncode)
+                return False
+            raise
+
+    def _remote(self, remote_path: str) -> str:
+        """Format ``alias:remote_path`` for use as an rsync source.
+
+        Args:
+            remote_path: Absolute path on the reMarkable filesystem.
+
+        Returns:
+            rsync-compatible remote URI string.
+        """
+        return f"{self.alias}:{remote_path}"
+
+    # ------------------------------------------------------------------
+    # Sync modes
+    # ------------------------------------------------------------------
+
+    def full_sync(self) -> None:
+        """Mirror the entire ``xochitl/`` directory into :attr:`cache_dir`.
+
+        Uses a **trailing slash** on the source path so rsync copies the
+        *contents* of ``xochitl/`` directly into ``cache_dir/``, preserving
+        the flat UUID layout that :class:`~parser.DocumentParser` expects::
+
+            .RM_FILES/
+            ├── <uuid>.metadata
+            ├── <uuid>.content
+            ├── <uuid>.pdf
+            └── <uuid>/
+                ├── <page-uuid>.rm
+                └── …
+
+        The ``--delete`` flag removes locally cached files that no longer
+        exist on the tablet (deleted documents), keeping the cache a true
+        mirror.
+
+        Note:
+            This downloads the entire library.  For large libraries (100 +
+            documents) the first run may take a while; subsequent runs are
+            incremental.
+        """
+        # Trailing slash on source = copy *contents*, not the directory itself
+        src = self._remote(RM_ROOT + "/")
+        log.info("Full sync: %s → %s", src, self.cache_dir)
+        self._rsync(src, self.cache_dir, extra_flags=["--delete"])
+        log.info("Full sync complete.")
+
+    def selective_sync(self, uuids: List[str]) -> None:
+        """Download only the assets required for the given document UUIDs.
+
+        For each UUID, fetches:
+
+        * ``<uuid>.metadata``  (required — raises on missing)
+        * ``<uuid>.content``   (required — raises on missing)
+        * ``<uuid>.pdf``       (optional)
+        * ``<uuid>.pagedata``  (optional)
+        * ``<uuid>.bookmarks`` (optional)
+        * ``<uuid>/``          (required — stroke ``.rm`` files)
+
+        The ``--ignore-existing`` flag skips files already in the local cache
+        unless you want a forced refresh (call :meth:`full_sync` for that).
+
+        Args:
+            uuids: List of document UUID strings to download.
+        """
+        log.info("Selective sync: %d document(s).", len(uuids))
+        for uuid in uuids:
+            log.info("  Syncing document %s …", uuid)
+            self._sync_document(uuid)
+
+    # ------------------------------------------------------------------
+    # Parent metadata (for resolve_folder_path)
+    # ------------------------------------------------------------------
+
+    def fetch_parent_metadata(self, parent_uuid: str) -> bool:
+        """Fetch a single ``.metadata`` file for folder-path resolution.
+
+        :func:`~main.resolve_folder_path` walks the parent chain stored in
+        ``DocumentMeta.parent``.  In selective-sync mode, ancestor folder
+        metadata may not have been downloaded.  This method retrieves it on
+        demand.
+
+        Args:
+            parent_uuid: UUID of the parent folder whose metadata is needed.
+
+        Returns:
+            ``True`` if the file was successfully downloaded, ``False`` if it
+            is absent on the tablet (e.g. orphaned document).
+        """
+        remote = self._remote(f"{RM_ROOT}/{parent_uuid}.metadata")
+        dst    = self.cache_dir / f"{parent_uuid}.metadata"
+        if dst.exists():
+            log.debug("Parent metadata already cached: %s", parent_uuid)
+            return True
+        log.debug("Fetching parent metadata on demand: %s", parent_uuid)
+        return self._rsync(remote, self.cache_dir, optional=True)
+
+    # ------------------------------------------------------------------
+    # Private document sync helper
+    # ------------------------------------------------------------------
+
+    def _sync_document(self, uuid: str) -> None:
+        """Sync all assets for a single document UUID.
+
+        Sidecar files are synced first (flat into :attr:`cache_dir`), then the
+        stroke directory.
+
+        Note on rsync directory layout:
+            ``rsync alias:xochitl/uuid  .RM_FILES/``  (no trailing slash on
+            source) copies the *directory* ``uuid/`` into ``.RM_FILES/``,
+            creating ``.RM_FILES/uuid/``.  This is intentional and matches the
+            flat-cache layout required by :class:`~parser.DocumentParser`.
+
+        Args:
+            uuid: Document UUID to sync.
+
+        Raises:
+            subprocess.CalledProcessError: If a required file (``.metadata``,
+                ``.content``) is missing on the tablet.
+        """
+        base = f"{RM_ROOT}/{uuid}"
+
+        # ── Sidecar files ────────────────────────────────────────────────────
+        sidecar_specs: List[tuple[str, bool]] = [
+            (f"{base}.metadata",  True),   # required
+            (f"{base}.content",   True),   # required
+            (f"{base}.pdf",       False),  # optional — absent for pure notebooks
+            (f"{base}.pagedata",  False),  # optional
+            (f"{base}.bookmarks", False),  # optional
+        ]
+
+        for remote_path, required in sidecar_specs:
+            self._rsync(
+                self._remote(remote_path),
+                self.cache_dir,
+                optional=not required,
             )
 
-    def resolve_ssh_alias(self,alias:str) -> dict | None:
-        """
-        Input: alias name
-        look up alias in ~/.ssh/config
-        Returns: hostname, user, port, identityfile (optional)
-        """
-        import paramiko
-        ssh_config_path = Path.home() / ".ssh" / "config"
-        if not ssh_config_path.exists():
-            return None
-        cfg = paramiko.SSHConfig()
-        with ssh_config_path.open() as f:
-            cfg.parse(f)
-        host_cfg = cfg.lookup(alias)
-        # paramiko returns the alias itself as 'hostname' when there is no match
-        if host_cfg.get("hostname", alias) == alias and alias not in ssh_config_path.read_text():
-            return None
-        params: dict = {
-            "hostname": host_cfg.get("hostname", alias),
-            "user":     host_cfg.get("user", "root"),
-            "port":     int(host_cfg.get("port", 22)),
-        }
-        identity = host_cfg.get("identityfile")
-        if identity:
-            raw = identity[0] if isinstance(identity, list) else identity
-            params["identityfile"] = str(Path(raw).expanduser())
-        return params
-
-    def connect(self, profile: str | None) -> tuple["paramiko.SSHClient", "paramiko.SFTPClient", str]:
-        """
-        Establish an SSH connection to the reMarkable.
-
-        Tries each alias in *profile* order (or a single alias if *profile* is set).
-        Falls back to MANUAL_HOST if all alias attempts fail.
-
-        Args:
-            profile: Optional[str] -> A specific profile to connect to.
-        Returns: 
-            (ssh_client, sftp_client, alias_used).
-        """
-        import paramiko
-
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-        aliases = [PROFILES[profile]] if profile else [PROFILES[p] for p in PROFILE_ORDER]
-        last_error: Exception | None = None
-
-        for alias in aliases:
-            params = self.resolve_ssh_alias(alias)
-            if not params:
-                log.debug("SSH alias %r not found in ~/.ssh/config, skipping.", alias)
-                continue
-            try:
-                kwargs: dict = {
-                    "hostname": params["hostname"],
-                    "port":     params["port"],
-                    "username": params["user"],
-                    "timeout":  8,
-                }
-                if "identityfile" in params:
-                    kwargs["key_filename"] = params["identityfile"]
-                elif MANUAL_PASSWORD:
-                    kwargs["password"] = MANUAL_PASSWORD
-
-                log.info("Trying %s (%s)…", alias, params["hostname"])
-                client.connect(**kwargs)
-                sftp = client.open_sftp()
-                self._ssh = client
-                self._scp = SCPClient(client.get_transport(), socket_timeout=SCP_TIMEOUT)
-                log.info("Connected via %s.", alias)
-                return client, sftp, alias
-            except Exception as exc:
-                log.debug("  %s failed: %s", alias, exc)
-                last_error = exc
-
-        # Manual fallback
-        if MANUAL_HOST:
-            try:
-                log.info("Trying manual host %s…", MANUAL_HOST)
-                kwargs = {
-                    "hostname": MANUAL_HOST,
-                    "port":     MANUAL_PORT,
-                    "username": MANUAL_USER,
-                    "timeout":  8,
-                }
-                if MANUAL_SSH_KEY:
-                    kwargs["key_filename"] = str(MANUAL_SSH_KEY)
-                elif MANUAL_PASSWORD:
-                    kwargs["password"] = MANUAL_PASSWORD
-                client.connect(**kwargs)
-                sftp = client.open_sftp()
-                self._ssh = client
-                self._scp = SCPClient(client.get_transport(), socket_timeout=SCP_TIMEOUT)
-                return client, sftp, f"manual:{MANUAL_HOST}"
-            except Exception as exc:
-                last_error = exc
-
-        log.error("Could not connect to reMarkable.  Last error: %s", last_error)
-        sys.exit(1)
-    
-    def disconnect(self) -> None:
-        """Close the SCP channel and the underlying SSH connection."""
-        if self._scp:
-            self._scp.close()
-        if self._ssh:
-            self._ssh.close()
-        log.info("✂️🔌✂️🔌✂️🔌✂️🔌✂️🔌 Disconnected. ✂️🔌✂️🔌✂️🔌✂️🔌✂️🔌")
-
-    #=====================================================
-    # Remote file operations
-    #=====================================================
-    def file_exists(self, remote_path: str) -> bool:
-        """Check whether a path exists on the tablet filesystem.
-
-        Args:
-            remote_path: Absolute path on the tablet.
-
-        Returns:
-            ``True`` if the file exists, ``False`` otherwise.
-        """
-        self._ensure_connected()
-        _, stdout, _ = self._ssh.exec_command(
-            f'test -f "{remote_path}" && echo yes || echo no'
+        # ── Stroke directory (uuid/ → .RM_FILES/uuid/) ───────────────────────
+        # No trailing slash on source: rsync copies the directory *itself*,
+        # so .RM_FILES/uuid/ is created automatically.
+        self._rsync(
+            self._remote(base),
+            self.cache_dir,
         )
-        return stdout.read().decode().strip() == "yes"
 
-    def download(self, remote_path: str, local_path: str) -> None:
-        """Download a single file from the tablet via SCP.
 
-        Args:
-            remote_path: Absolute path on the tablet.
-            local_path:  Destination path on the local machine.
-        """
-        self._ensure_connected()
-        log.debug("SCP ← %s", remote_path)
-        self._scp.get(remote_path, local_path)
-
-    def download_directory(self, remote_dir: str, local_dir: str) -> None:
-        """Recursively download an entire remote directory via SCP.
-
-        Args:
-            remote_dir: Absolute path to the remote directory.
-            local_dir:  Destination directory on the local machine.
-        """
-        self._ensure_connected()
-        log.debug("SCP dir ← %s", remote_dir)
-        self._scp.get(remote_dir, local_dir, recursive=True)
-
-    def list_dir(self, remote_dir: str) -> List[str]:
-        """List filenames inside a remote directory (names only, not full paths).
-
-        Args:
-            remote_dir: Absolute path to the remote directory.
-
-        Returns:
-            A list of filename strings.  Returns an empty list if the
-            directory is absent or empty.
-        """
-        self._ensure_connected()
-        _, stdout, _ = self._ssh.exec_command(
-            f'ls "{remote_dir}" 2>/dev/null'
-        )
-        output = stdout.read().decode().strip()
-        return [x for x in output.splitlines() if x] if output else []
-
+# ---------------------------------------------------------------------------
+# FileDownloader — convenience alias kept for import compatibility
+# ---------------------------------------------------------------------------
 
 class FileDownloader:
-    """
-    Downloads all files required to reconstruct specified documents from the reMarkable tablet.
+    """High-level selective-sync wrapper.
 
-    This class uses a connected :class:`RMClient` to selectively fetch:
+    Thin façade over :class:`RsyncClient` that mirrors the original interface
+    so existing call-sites in ``main.py`` can stay mostly unchanged.
 
-        <uuid>.metadata         (required — document name, type)
-        <uuid>.content          (required — page list with redirect indices)
-        <uuid>.pdf              (optional — absent for pure notebooks)
-        <uuid>/<page_uuid>.rm   (one per page — stroke binary data)
-
-    Attributes:
-        client:   RMClient instance connected to the tablet.
-        work_dir: Local directory for downloaded files.
-        uuids:    List of document UUIDs to download.
+    Args:
+        client:   A configured :class:`RsyncClient` instance.
+        uuids:    Document UUIDs to download.
     """
 
-    def __init__(
-        self,
-        client: RMClient,
-        work_dir: Path,
-        uuids: List[str],
-    ) -> None:
-        """
-        Initialize the downloader for one or more documents.
-
-        Args:
-            client:   A connected RMClient instance.
-            work_dir: Directory where files will be downloaded.
-            uuids:    List of document UUIDs to download.
-        """
+    def __init__(self, client: RsyncClient, uuids: List[str]) -> None:
         self.client = client
-        self.work_dir = work_dir
-        self.uuids = uuids
-        self._remotes = [f"{RM_ROOT}/{uuid}" for uuid in uuids]
+        self.uuids  = uuids
 
     def download_all(self) -> None:
-        """Execute all download steps for all specified documents.
-
-        Downloads ``.metadata``, ``.content``, the optional ``.pdf``, and
-        every ``.rm`` stroke file found in the ``<uuid>/`` subdirectory for each uuid in uuids.
-
-        Raises:
-            FileNotFoundError: If ``.metadata`` or ``.content`` are absent on
-                the tablet for any uuid.
-        """
-        for uuid in self.uuids:
-            self._get(uuid, ".metadata", required=True)
-            self._get(uuid, ".content", required=True)
-            self._get(uuid, ".pdf", required=False)
-            self._download_rm_folder(uuid)
-
-    # ------------------------------------------------------------------
-    # Private
-    # ------------------------------------------------------------------
-
-    def _get(self, uuid: str, suffix: str, *, required: bool) -> None:
-        """Download ``<uuid><suffix>`` from the tablet.
-
-        Args:
-            uuid:     Document UUID
-            suffix:   File extension including the leading dot
-                (e.g. ``".metadata"``).
-            required: If ``True`` and the remote file is absent, raises
-                :exc:`FileNotFoundError`.
-
-        Raises:
-            FileNotFoundError: When *required* is ``True`` and the remote
-                file does not exist.
-        """
-        remote = f"{RM_ROOT}/{uuid}{suffix}"
-        local  = str(self.work_dir / f"{uuid}{suffix}")
-        if self.client.file_exists(remote):
-            self.client.download(remote, local)
-        elif required:
-            raise FileNotFoundError(
-                f"Required remote file missing: {remote}"
-            )
-        else:
-            log.debug("Optional file absent (skipped): %s", remote)
-
-    def _download_rm_folder(self, uuid: str) -> None:
-        """Download all ``.rm`` stroke files from the ``<uuid>/`` subdirectory.
-
-        Creates the mirror directory under :attr:`work_dir` and downloads each
-        ``.rm`` file individually (avoids SCP recursive issues on some hosts).
-        Logs a warning and returns silently if no ``.rm`` files are present.
-        """
-        remote_dir = f"{RM_ROOT}/{uuid}"
-        local_dir  = str(self.work_dir / uuid)
-        os.makedirs(local_dir, exist_ok=True)
-
-        rm_files = [
-            f for f in self.client.list_dir(remote_dir)
-            if f.endswith(".rm")
-        ]
-        if not rm_files:
-            log.warning("No .rm files found inside %s", remote_dir)
-            return
-
-        for rm_file in rm_files:
-            self.client.download(
-                f"{remote_dir}/{rm_file}",
-                os.path.join(local_dir, rm_file),
-            )
-        log.info("Downloaded %d .rm file(s) for %s.", len(rm_files), uuid)
+        """Delegate to :meth:`RsyncClient.selective_sync`."""
+        self.client.selective_sync(self.uuids)

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 """
 Build a cached index mapping UUID -> file paths + metadata from a reMarkable device over SSH.
 Tries all plausible SSH config hostnames in ~/.ssh/config for connection (usb, hotspot, home).

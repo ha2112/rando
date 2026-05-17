@@ -87,11 +87,6 @@ class PDFRenderer:
 
             x_origin = float(crop.x0)
             y_origin = float(crop.y0)
-
-            print(f"📝📝📝 PDF Crop box: {crop}")
-            print(f"📝📝📝 Target dimensions (w, h): ({target_w}, {target_h})")
-            print(f"📝📝📝 Origin (x0, y0): ({x_origin}, {y_origin})")
-       
         else:
             target_w = BLANK_PAGE_WIDTH_PT
             target_h = BLANK_PAGE_HEIGHT_PT
@@ -409,19 +404,36 @@ class PDFRenderer:
         r, g, b = pen_color_to_rgb(stroke.color)
         color   = (r, g, b)
         width   = max(MIN_LINE_WIDTH, BASE_LINE_WIDTH * stroke.width)
-        pts     = [fitz.Point(pt.x, pt.y) for pt in stroke.points]
-        pts     = self._smooth_points(pts, width)   # no-op for large brushes
+        pts = [fitz.Point(pt.x, pt.y) for pt in stroke.points]
+
+        # Detect closed geometric shapes (rectangle/triangle/etc.)
+        is_closed = (
+            len(pts) >= 4 and
+            abs(pts[0].x - pts[-1].x) < 1 and
+            abs(pts[0].y - pts[-1].y) < 1
+        )
+
+        # ONLY smooth non-closed strokes
+        if not is_closed:
+            pts = self._smooth_points(pts, width)
 
         try:
             shape = page.new_shape()
-            shape.draw_polyline(pts)
+
+            if is_closed:
+                # Remove duplicated closing point
+                shape.draw_polyline(pts[:-1])
+            else:
+                shape.draw_polyline(pts)
+
             shape.finish(
                 color=color,
                 width=width,
-                lineCap=1,    # 0=butt  1=round  2=square
-                lineJoin=1,   # 0=miter 1=round  2=bevel  ← the key fix
-                closePath = False,
+                lineCap=1,
+                lineJoin=1,
+                closePath=is_closed,
             )
+
             shape.commit()
         except Exception as exc:
             log.warning("draw_stroke failed: %s", exc)
