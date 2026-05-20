@@ -1,4 +1,6 @@
-#!/opt/anaconda3/bin/python -u "/Users/academicweapon/Documents/CodingTypeShii/Repos/rando/remarkable-download/workflow/main.py" --sync full --render full --force &> "/Users/academicweapon/Documents/CodingTypeShii/Repos/rando/remarkable-download/workflow/output.log"
+#!/opt/anaconda3/bin/python -u "/Users/academicweapon/Documents/CodingTypeShii/Repos/rando/remarkable-download/workflow/main.py" --sync full --render full 
+
+# --force &> "/Users/academicweapon/Documents/CodingTypeShii/Repos/rando/remarkable-download/workflow/output.log"
 
 """
 main.py
