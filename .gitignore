@@ -151,3 +151,5 @@ uploaded_files.json
 uuid_index.json
 
 test_data/
+
+.claude/*

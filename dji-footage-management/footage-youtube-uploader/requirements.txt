@@ -1,0 +1,8 @@
+python-dotenv>=1.0.0
+tqdm>=4.60.0
+google-auth>=2.0.0
+google-auth-oauthlib>=1.0.0
+google-api-python-client>=2.0.0
+
+# Crontab command (runs daily at 10:50 PM, mirrors your existing one with corrected path):
+# /Users/academicweapon/Documents/CodingTypeShii/Repos/rando/dji-footage-management/footage-youtube-uploader/.dji-footage-uploader/bin/python -u "/Users/academicweapon/Documents/CodingTypeShii/Repos/rando/dji-footage-management/footage-youtube-uploader/youtube_footage_uploader.py" --live > "/Users/academicweapon/Documents/CodingTypeShii/Repos/rando/dji-footage-management/footage-youtube-uploader/cron.log" 2>&1
