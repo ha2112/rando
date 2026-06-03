@@ -1,5 +1,7 @@
 PyMuPDF>=1.24.0
 rmscene>=0.6.0
+typer[all]>=0.12
+rich>=13.0
 
 #  Crontab command (runs daily at 11 PM):
 #   0 23 * * * cd /Users/academicweapon/Documents/CodingTypeShii/Repos/rando/remarkable-download && /opt/anaconda3/bin/python -u

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rm-sync"
+version = "0.1.0"
+description = "Download and render reMarkable documents to annotated PDFs"
+requires-python = ">=3.10"
+dependencies = [
+    "PyMuPDF>=1.24.0",
+    "rmscene>=0.6.0",
+    "typer[all]>=0.12",
+    "rich>=13.0",
+]
+
+[project.scripts]
+rm-sync = "rm_sync.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["rm_sync*"]

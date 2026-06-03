@@ -152,4 +152,4 @@ uuid_index.json
 
 test_data/
 
-.claude/*
+.claude/*rm_sync.egg-info/
