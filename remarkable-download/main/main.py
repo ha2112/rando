@@ -1,4 +1,4 @@
-#/Users/academicweapon/Documents/CodingTypeShii/Repos/rando/remarkable-download/.remarkable-download/bin/python3 -u "/Users/academicweapon/Documents/CodingTypeShii/Repos/rando/remarkable-download/main/main.py" --sync full --render full --force &> "/Users/academicweapon/Documents/CodingTypeShii/Repos/rando/remarkable-download/main/output.log"
+#!/Users/academicweapon/Documents/CodingTypeShii/Repos/rando/remarkable-download/.remarkable-download/bin/python3 -u "/Users/academicweapon/Documents/CodingTypeShii/Repos/rando/remarkable-download/main/main.py" --sync full --render full --force &> "/Users/academicweapon/Documents/CodingTypeShii/Repos/rando/remarkable-download/main/output.log"
 
 """
 main.py
