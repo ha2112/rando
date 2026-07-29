@@ -212,7 +212,7 @@ class RsyncClient:
         # Trailing slash on source = copy *contents*, not the directory itself
         src = self._remote(RM_ROOT + "/")
         log.info("Full sync: %s → %s", src, self.cache_dir)
-        self._rsync(src, self.cache_dir, extra_flags=["--delete"])
+        self._rsync(src, self.cache_dir, extra_flags=["--delete", "--exclude=.rm_render_state.json*"])
         log.info("Full sync complete.")
 
     def selective_sync(self, uuids: List[str]) -> None:

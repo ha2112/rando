@@ -455,12 +455,15 @@ class RenderStateTracker:
     def scan_and_move_trash(self) -> int:
         """Scan every cached ``.metadata`` file for trashed documents.
 
-        For each document whose ``parent`` field equals ``"trash"``:
+        For each document whose parent chain (transitively) leads to ``"trash"``:
 
         * If a rendered PDF was previously recorded in the manifest, it is
           moved to ``output_base/.TRASH/`` via :meth:`handle_trash`.
         * The UUID is removed from the manifest so it will not be rendered
           in future runs.
+
+        This catches both documents with ``parent == "trash"`` (direct trash)
+        and documents inside a collection that was itself moved to trash.
 
         This should be called **after** the rsync step so the cache reflects
         the current tablet state (trashed metadata files are synced with
@@ -469,10 +472,14 @@ class RenderStateTracker:
         Returns:
             Number of rendered PDFs physically moved to ``.TRASH/``.
         """
+        trashed_uuids = _find_trashed_uuids(self.cache_dir)
         moved_count = 0
 
         for meta_path in sorted(self.cache_dir.glob("*.metadata")):
             uuid = meta_path.stem
+            if uuid not in trashed_uuids:
+                continue
+
             try:
                 with meta_path.open(encoding="utf-8") as fh:
                     raw = json.load(fh)
@@ -483,7 +490,8 @@ class RenderStateTracker:
                 )
                 continue
 
-            if raw.get("parent") != "trash":
+            # Skip collection entries — their children are caught transitively
+            if raw.get("type", "DocumentType") != "DocumentType":
                 continue
 
             visible_name = raw.get("visibleName", uuid)
@@ -499,6 +507,65 @@ class RenderStateTracker:
             log.debug("Trash scan: no trashed documents with rendered outputs found.")
 
         return moved_count
+
+    # ------------------------------------------------------------------
+    # Orphaned-output handling (documents that vanished from cache)
+    # ------------------------------------------------------------------
+
+    def handle_orphaned_outputs(self) -> int:
+        """Move rendered PDFs to ``.TRASH/`` when documents no longer exist in cache.
+
+        Called **after** :meth:`scan_and_move_trash` and **after** the rsync step.
+        Compares the render-state manifest against the current set of cached
+        ``.metadata`` files.  UUIDs that are in the manifest but have **no**
+        ``.metadata`` in the cache correspond to documents that were permanently
+        deleted from the tablet — the trash was emptied, or the user removed them
+        without ever trashing them.
+
+        The previously-rendered PDF (if it still exists) is moved to
+        ``.TRASH/``, where it can be recovered or eventually purged via
+        ``--force``.  The UUID is evicted from the manifest unconditionally.
+
+        This plugs the gap created by ``rsync --delete``: when a document's
+        metadata is removed from the tablet (trash-emptied) between two sync
+        runs, ``scan_and_move_trash`` can never read the ``parent == "trash"``
+        signal because the file is already gone from the local cache.
+
+        Returns:
+            Number of PDFs physically moved to ``.TRASH/``.
+        """
+        cached = {p.stem for p in self.cache_dir.glob("*.metadata")}
+        manifest = set(self._state.keys())
+        orphaned = manifest - cached
+
+        moved = 0
+        for uuid in sorted(orphaned):
+            old_path = self.get_output_path(uuid)
+            if old_path and old_path.exists():
+                trash_dir = self.output_base / ".TRASH"
+                trash_dir.mkdir(parents=True, exist_ok=True)
+
+                dest = trash_dir / old_path.name
+                if dest.exists():
+                    dest = trash_dir / f"{uuid[:8]}_{old_path.name}"
+
+                old_path.rename(dest)
+                log.info("  🗑️   Orphaned PDF → %s", dest)
+                moved += 1
+
+            self._state.pop(uuid, None)
+
+        if moved:
+            log.info(
+                "handle_orphaned_outputs: moved %d rendered PDF(s) to .TRASH/",
+                moved,
+            )
+        else:
+            log.debug(
+                "handle_orphaned_outputs: no orphaned rendered PDFs found."
+            )
+
+        return moved
 
     # ------------------------------------------------------------------
     # Trash purge (--force)
@@ -655,13 +722,55 @@ def make_stroke_provider(
 # Cache discovery
 # ---------------------------------------------------------------------------
 
+def _find_trashed_uuids(cache_dir: Path) -> set[str]:
+    """Return every UUID whose parent chain (transitively) leads to ``"trash"``.
+
+    Reads all ``.metadata`` files in *cache_dir* and walks the ``parent``
+    field to find the transitive closure of UUIDs that are directly or
+    indirectly in the trash bin.  This catches both:
+
+    * Documents whose ``parent == "trash"`` (direct trash).
+    * Documents inside a collection that was itself moved to trash
+      (they still show ``parent == <collection-uuid>`` — only the
+      collection's metadata has ``parent == "trash"``).
+
+    Returns:
+        Set of trashed UUID strings (collections + documents).
+    """
+    meta: dict[str, dict] = {}
+    for p in sorted(cache_dir.glob("*.metadata")):
+        try:
+            with p.open(encoding="utf-8") as fh:
+                meta[p.stem] = json.load(fh)
+        except Exception:
+            pass
+
+    # Seed: UUIDs whose direct parent is "trash"
+    trashed: set[str] = {u for u, r in meta.items() if r.get("parent") == "trash"}
+
+    # Transitive closure: UUIDs whose parent is itself in the trashed set.
+    # This walks nested collections (collection -> sub-collection -> doc).
+    changed = True
+    while changed:
+        changed = False
+        for uuid, raw in meta.items():
+            if uuid in trashed:
+                continue
+            parent = raw.get("parent")
+            if parent and parent in trashed:
+                trashed.add(uuid)
+                changed = True
+
+    return trashed
+
+
 def discover_cached_uuids(cache_dir: Path) -> List[str]:
     """Return the UUIDs of every renderable document found in *cache_dir*.
 
     A UUID is considered renderable when **both** ``<uuid>.metadata`` and
     ``<uuid>.content`` exist in the cache root.  Folder entries
     (``type == "CollectionType"``) and trashed documents
-    (``parent == "trash"``) are filtered out.
+    are filtered out.
 
     Args:
         cache_dir: Root of the local cache (flat xochitl mirror).
@@ -669,6 +778,7 @@ def discover_cached_uuids(cache_dir: Path) -> List[str]:
     Returns:
         Sorted list of UUID strings, one per renderable document.
     """
+    trashed_uuids = _find_trashed_uuids(cache_dir)
     uuids: List[str] = []
 
     for meta_path in sorted(cache_dir.glob("*.metadata")):
@@ -692,8 +802,9 @@ def discover_cached_uuids(cache_dir: Path) -> List[str]:
             log.debug("Skipping %s — type is %r.", uuid, meta.get("type"))
             continue
 
-        # Skip documents in the reMarkable trash
-        if meta.get("parent") == "trash":
+        # Skip documents that are directly or indirectly in the reMarkable trash.
+        # This catches both parent=="trash" and documents in a trashed collection.
+        if uuid in trashed_uuids:
             log.debug("Skipping %s (%r) — in trash.", uuid, meta.get("visibleName", uuid))
             continue
 

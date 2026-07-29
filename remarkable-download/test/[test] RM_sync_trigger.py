@@ -1,3 +1,4 @@
+#!/Users/academicweapon/Documents/CodingTypeShii/Repos/rando/remarkable-download/.remarkable-download/bin/python3
 
 """
 Lightweight reMarkable sync trigger.

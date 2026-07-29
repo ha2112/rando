@@ -35,7 +35,11 @@ from tqdm import tqdm
 # ── Configuration ────────────────────────────────────────────────────────────
 
 # Load environment variables from a .env file (useful for hiding system paths)
-load_dotenv()
+# Walk up from the script's directory to find the project-root .env
+env_path = Path(__file__).parent
+while not (env_path / ".env").exists() and env_path.parent != env_path:
+    env_path = env_path.parent
+load_dotenv(env_path / ".env")
 
 # Read the target footage folder from environment variables
 FOOTAGE_FOLDER   = os.getenv("DJI_FOOTAGE_FOLDER_PATH", "")

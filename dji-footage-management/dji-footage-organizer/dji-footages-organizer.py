@@ -1,3 +1,5 @@
+#! /Users/academicweapon/Documents/CodingTypeShii/Repos/rando/dji-footage-management/footage-youtube-uploader/.dji-footage-uploader/bin/python
+
 import os
 import re
 from pathlib import Path

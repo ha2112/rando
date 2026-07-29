@@ -176,6 +176,10 @@ def sync(
     console.print("[bold]Trash scan…[/bold]")
     tracker.scan_and_move_trash()
 
+    # ---- orphaned outputs (documents deleted from tablet between syncs) ----
+    console.print("[bold]Orphaned output scan…[/bold]")
+    tracker.handle_orphaned_outputs()
+
     # ---- force: purge .TRASH ----
     if force:
         console.print("[bold]Purging .TRASH/ (--force)…[/bold]")
@@ -298,6 +302,11 @@ def pull(
     tracker = RenderStateTracker(cache_dir=cache_dir, output_base=output_base)
     console.print("[bold]Trash scan…[/bold]")
     tracker.scan_and_move_trash()
+
+    # orphaned outputs (documents deleted from tablet between syncs)
+    console.print("[bold]Orphaned output scan…[/bold]")
+    tracker.handle_orphaned_outputs()
+
     tracker.save()
 
     console.print("[green]Pull complete.[/green]")
@@ -331,6 +340,9 @@ def render(
         raise typer.Exit(1)
 
     tracker = RenderStateTracker(cache_dir=cache_dir, output_base=output_base)
+
+    # orphaned outputs (for manual cache deletions)
+    tracker.handle_orphaned_outputs()
 
     if force:
         tracker.purge_trash()

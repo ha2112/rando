@@ -155,3 +155,5 @@ test_data/
 .claude/
 
 *rm_sync.egg-info/
+
+*.err
