@@ -157,3 +157,5 @@ test_data/
 *rm_sync.egg-info/
 
 *.err
+
+*.plist

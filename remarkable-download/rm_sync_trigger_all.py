@@ -136,7 +136,7 @@ def trigger_sync(host, uuid):
     data["lastOpened"] = open_now_ms
     data["modified"] = True
     data["synced"] = False
-    data["version"] = data.get("version", 0) + 1
+    data["version"] = 0 # data.get("version", 0) + 1
 
     updated = json.dumps(data, indent=4)
     ssh_write(host, metadata_path, updated)
