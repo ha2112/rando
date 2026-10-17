@@ -175,19 +175,22 @@ def sync(
     else:
         client.full_sync()
 
-    # ---- trash scan ----
     tracker = RenderStateTracker(cache_dir=cache_dir, output_base=output_base)
+
+    # ---- force: purge files already in .TRASH before this run's cleanup ----
+    if force:
+        console.print("[bold]Purging .TRASH/ (--force)…[/bold]")
+        tracker.purge_trash()
+
+    # ---- trash scan ----
     console.print("[bold]Trash scan…[/bold]")
     tracker.scan_and_move_trash()
 
     # ---- orphaned outputs (documents deleted from tablet between syncs) ----
     console.print("[bold]Orphaned output scan…[/bold]")
     tracker.handle_orphaned_outputs()
-
-    # ---- force: purge .TRASH ----
-    if force:
-        console.print("[bold]Purging .TRASH/ (--force)…[/bold]")
-        tracker.purge_trash()
+    if not uuids:
+        tracker.move_untracked_outputs()
 
     # ---- resolve render list ----
     if uuids:
@@ -197,6 +200,8 @@ def sync(
 
     if not render_uuids:
         console.print("[yellow]No documents to render.[/yellow]")
+        if not uuids:
+            tracker.reconcile_output_folders()
         tracker.save()
         return
 
@@ -230,6 +235,8 @@ def sync(
             log.exception("Error processing %s", doc_uuid)
             errors.append((doc_name, doc_uuid, exc))
 
+    if not uuids:
+        tracker.reconcile_output_folders()
     tracker.save()
 
     # ---- summary ----
@@ -383,7 +390,11 @@ def pull(
     # orphaned outputs (documents deleted from tablet between syncs)
     console.print("[bold]Orphaned output scan…[/bold]")
     tracker.handle_orphaned_outputs()
+    if not uuids:
+        tracker.move_untracked_outputs()
 
+    if not uuids:
+        tracker.reconcile_output_folders()
     tracker.save()
 
     console.print("[green]Pull complete.[/green]")

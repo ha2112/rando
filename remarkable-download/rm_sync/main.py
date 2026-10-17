@@ -462,8 +462,8 @@ class RenderStateTracker:
         * The UUID is removed from the manifest so it will not be rendered
           in future runs.
 
-        This catches both documents with ``parent == "trash"`` (direct trash)
-        and documents inside a collection that was itself moved to trash.
+        This catches documents marked deleted, documents with
+        ``parent == "trash"``, and documents inside a trashed collection.
 
         This should be called **after** the rsync step so the cache reflects
         the current tablet state (trashed metadata files are synced with
@@ -566,6 +566,102 @@ class RenderStateTracker:
             )
 
         return moved
+
+    def move_untracked_outputs(self) -> int:
+        """Move PDFs with no matching cached document to .TRASH after a full sync."""
+        active_paths: set[Path] = set()
+        trashed = _find_trashed_uuids(self.cache_dir)
+
+        for meta_path in self.cache_dir.glob("*.metadata"):
+            try:
+                with meta_path.open(encoding="utf-8") as fh:
+                    raw = json.load(fh)
+            except Exception as exc:
+                log.warning("Skipping untracked output scan: cannot read %s: %s", meta_path, exc)
+                return 0
+
+            if raw.get("type", "DocumentType") != "DocumentType" or meta_path.stem in trashed:
+                continue
+
+            try:
+                folder = resolve_folder_path(meta_path.stem, self.cache_dir)
+            except Exception as exc:
+                log.warning("Skipping untracked output scan: cannot resolve %s: %s", meta_path, exc)
+                return 0
+            name = raw.get("visibleName", meta_path.stem).replace("/", "_").replace("\\", "_")
+            active_paths.add((self.output_base / folder / f"{name}.pdf").resolve())
+
+        tracked_paths = {
+            Path(entry["output_path"]).resolve()
+            for entry in self._state.values()
+            if entry.get("output_path")
+        }
+        expected_paths = active_paths | tracked_paths
+        trash_dir = self.output_base / ".TRASH"
+        moved = 0
+
+        for pdf in self.output_base.rglob("*.pdf"):
+            if pdf.is_relative_to(trash_dir) or pdf.resolve() in expected_paths:
+                continue
+            trash_dir.mkdir(parents=True, exist_ok=True)
+            dest = trash_dir / pdf.name
+            suffix = 1
+            while dest.exists():
+                dest = trash_dir / f"{pdf.stem}_{suffix}.pdf"
+                suffix += 1
+            pdf.rename(dest)
+            log.info("  🗑️   Untracked PDF → %s", dest)
+            moved += 1
+
+        return moved
+
+    def reconcile_output_folders(self) -> int:
+        """Restore current tablet folders and remove empty stale output folders."""
+        trash_dir = self.output_base / ".TRASH"
+        output_root = self.output_base.resolve()
+        active_folders: set[Path] = set()
+        trashed = _find_trashed_uuids(self.cache_dir)
+
+        for meta_path in self.cache_dir.glob("*.metadata"):
+            try:
+                with meta_path.open(encoding="utf-8") as fh:
+                    raw = json.load(fh)
+                if not isinstance(raw, dict):
+                    raise ValueError("metadata is not an object")
+            except Exception as exc:
+                log.warning("Skipping folder cleanup: cannot read %s: %s", meta_path, exc)
+                return 0
+
+            if raw.get("type") != "CollectionType" or meta_path.stem in trashed:
+                continue
+
+            try:
+                name = raw.get("visibleName", meta_path.stem)
+                folder = (self.output_base / resolve_folder_path(meta_path.stem, self.cache_dir) / name).resolve()
+            except Exception as exc:
+                log.warning("Skipping folder cleanup: cannot resolve %s: %s", meta_path, exc)
+                return 0
+            if folder == output_root or not folder.is_relative_to(output_root):
+                log.warning("Skipping folder outside output directory: %s", folder)
+                continue
+            active_folders.add(folder)
+
+        for folder in active_folders:
+            folder.mkdir(parents=True, exist_ok=True)
+
+        removed = 0
+
+        for path in sorted(self.output_base.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+            if not path.is_dir() or path.is_symlink() or path == trash_dir or path.resolve() in active_folders:
+                continue
+            try:
+                path.rmdir()
+            except OSError:
+                continue  # Folder still contains an output or other user file.
+            log.info("  🧹  Removed empty output folder: %s", path)
+            removed += 1
+
+        return removed
 
     # ------------------------------------------------------------------
     # Trash purge (--force)
@@ -723,13 +819,14 @@ def make_stroke_provider(
 # ---------------------------------------------------------------------------
 
 def _find_trashed_uuids(cache_dir: Path) -> set[str]:
-    """Return every UUID whose parent chain (transitively) leads to ``"trash"``.
+    """Return deleted UUIDs and those whose parent chain leads to ``"trash"``.
 
     Reads all ``.metadata`` files in *cache_dir* and walks the ``parent``
-    field to find the transitive closure of UUIDs that are directly or
-    indirectly in the trash bin.  This catches both:
+    and ``deleted`` fields to find the transitive closure of UUIDs that are
+    directly or indirectly in the trash bin.  This catches:
 
     * Documents whose ``parent == "trash"`` (direct trash).
+    * Documents whose ``deleted`` flag is true.
     * Documents inside a collection that was itself moved to trash
       (they still show ``parent == <collection-uuid>`` — only the
       collection's metadata has ``parent == "trash"``).
@@ -745,8 +842,11 @@ def _find_trashed_uuids(cache_dir: Path) -> set[str]:
         except Exception:
             pass
 
-    # Seed: UUIDs whose direct parent is "trash"
-    trashed: set[str] = {u for u, r in meta.items() if r.get("parent") == "trash"}
+    # Seed: UUIDs in the trash or marked deleted by the tablet.
+    trashed: set[str] = {
+        u for u, r in meta.items()
+        if r.get("parent") == "trash" or r.get("deleted") is True
+    }
 
     # Transitive closure: UUIDs whose parent is itself in the trashed set.
     # This walks nested collections (collection -> sub-collection -> doc).

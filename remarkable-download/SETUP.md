@@ -34,7 +34,7 @@ Global flags available on every command:
 | Flag            | Effect                                          |
 |-----------------|-------------------------------------------------|
 | `--dry-run`     | Preview what would happen without making changes |
-| `--force`       | Bypass change detection; re-render everything    |
+| `--force`       | On sync/render, re-render and purge `.TRASH/` contents |
 | `--verbose`, `-v` | Enable DEBUG-level logging                     |
 
 ## Package structure
@@ -108,6 +108,11 @@ tablet screen).
 ```bash
 rm-sync sync
 ```
+
+Full sync treats the output directory as managed: PDFs with no matching tablet
+document are moved to `.TRASH/`. Current tablet folders, including empty ones,
+are kept; empty folders no longer on the tablet are removed. Keep unrelated
+PDFs outside that directory.
 
 **Just download, render later:**
 ```bash
