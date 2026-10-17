@@ -26,6 +26,7 @@ rm-sync --help
 | `rm-sync pull`   | Rsync files from the tablet (no render)    |
 | `rm-sync render` | Render PDFs from the local cache only      |
 | `rm-sync status` | Show which docs are new / changed / deleted |
+| `rm-sync trigger` | Flag every tablet document for cloud sync |
 | `rm-sync init`   | Interactive setup → `~/.config/rm-sync/config.toml` |
 
 Global flags available on every command:
@@ -122,6 +123,13 @@ rm-sync render --force
 ```bash
 rm-sync status
 ```
+
+**Trigger cloud sync for every document on the tablet:**
+```bash
+rm-sync trigger
+```
+
+Use `rm-sync --dry-run trigger` to count the documents without changing their metadata.
 
 **Preview pipeline without touching files:**
 ```bash

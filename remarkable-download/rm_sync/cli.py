@@ -9,6 +9,7 @@ rm-sync sync      Full pipeline: rsync → trash scan → render all
 rm-sync pull      Rsync only (no render)
 rm-sync render    Render from local cache only
 rm-sync status    Show document change status
+rm-sync trigger   Flag every tablet document for cloud sync
 rm-sync init      Interactive config setup → ~/.config/rm-sync/config.toml
 """
 
@@ -16,9 +17,12 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import List, Optional
+from uuid import UUID
 
 import typer
 from rich.console import Console
@@ -27,7 +31,7 @@ from rich.table import Table
 # Flat imports match the style of the existing codebase.
 # rm_sync/__init__.py injects this directory into sys.path so they resolve.
 from client import RsyncClient, FileDownloader
-from config import _BASE_DIR, DONE_DIR, PROFILES, PROFILE_ORDER
+from config import _BASE_DIR, DONE_DIR, PROFILES, PROFILE_ORDER, RM_ROOT
 from main import (
     RenderStateTracker,
     _process_document,
@@ -246,6 +250,79 @@ def sync(
         raise typer.Exit(2)
 
     console.print(f"[green]Done. Output → {output_base}[/green]")
+
+
+# ---------------------------------------------------------------------------
+# trigger — flag every document for cloud sync
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def trigger(
+    ctx: typer.Context,
+    mode: Optional[str] = typer.Option(
+        None,
+        "--mode",
+        help=f"SSH profile. One of: {', '.join(sorted(PROFILES))}. Auto-detected when omitted.",
+    ),
+) -> None:
+    """Trigger reMarkable cloud sync for every document on the tablet."""
+    try:
+        alias = _resolve_profile_auto(mode, PROFILES, PROFILE_ORDER)
+        result = subprocess.run(
+            ["ssh", alias, f"ls '{RM_ROOT}'/*.metadata"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (ValueError, ConnectionError, subprocess.CalledProcessError, OSError) as exc:
+        console.print(f"[red]Error:[/red] Could not list documents: {exc}")
+        raise typer.Exit(1)
+
+    uuids = sorted(
+        Path(path.strip()).name.removesuffix(".metadata")
+        for path in result.stdout.splitlines()
+        if path.strip().endswith(".metadata")
+    )
+    if ctx.obj["dry_run"]:
+        console.print(f"[bold cyan]Dry run — would trigger {len(uuids)} document(s) via {alias}.[/bold cyan]")
+        return
+
+    errors = []
+    for doc_uuid in uuids:
+        try:
+            UUID(doc_uuid)  # Only UUID filenames may become remote shell paths.
+            metadata_path = f"{RM_ROOT}/{doc_uuid}.metadata"
+            result = subprocess.run(
+                ["ssh", alias, f"cat '{metadata_path}'"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            data = json.loads(result.stdout)
+
+            now_ms = int(time.time() * 1000)
+            data["lastModified"] = str(now_ms)
+            data["lastOpened"] = str(now_ms - 12000)
+            data["modified"] = True
+            data["synced"] = False
+            data["version"] = 0
+
+            subprocess.run(
+                ["ssh", alias, f"cat > '{metadata_path}'"],
+                input=json.dumps(data, indent=4),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            console.print(f"[green]Triggered[/green] {doc_uuid}")
+        except (ValueError, TypeError, subprocess.CalledProcessError, OSError) as exc:
+            console.print(f"[red]Failed[/red] {doc_uuid}: {exc}")
+            errors.append(doc_uuid)
+
+    console.print(f"Triggered {len(uuids) - len(errors)}/{len(uuids)} document(s).")
+    if errors:
+        raise typer.Exit(2)
 
 
 # ---------------------------------------------------------------------------
