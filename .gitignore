@@ -161,3 +161,5 @@ test_data/
 *.plist
 
 */rm-sync-analysis/*
+
+remarkable-download/output/pdf/*
