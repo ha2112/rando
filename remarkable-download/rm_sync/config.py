@@ -14,7 +14,6 @@ Edit values here to customize behavior.
 """
 from __future__ import annotations
 
-import random
 from pathlib import Path
 from typing import Dict, Tuple
 
@@ -80,7 +79,7 @@ BLANK_PAGE_HEIGHT_PT: float = RM_HEIGHT
 RM_HALF_WIDTH: float = RM_WIDTH/2.0 
 RM_HEIGHT_OFFSET: float = 0
 
-SCALE: float = 349.0 / 1100.0
+SCALE: float = 72.0 / 227.0  # Native Pen fixture export transform.
 
 # =============================================================================================================================
 # PEN RENDERING CONFIGURATION
@@ -98,41 +97,22 @@ HIGHLIGHT_OPACITY_PLAIN: float = 0.35
 HIGHLIGHT_WIDTH_MIN: float = 10.0
 HIGHLIGHT_WIDTH_SCALE: float = 15.0
 
-# Static pen colors (RGB in range [0, 1])
+# RGB bytes measured from the supplied native Pen test export.
 PEN_COLOR_MAP: Dict[int, Tuple[float, float, float]] = {
-    0: (0.00, 0.00, 0.00),  # Black
-    1: (0.50, 0.50, 0.50),  # Gray
-    2: (1.00, 1.00, 1.00),  # White
-    6: (0.00, 0.40, 1.00),  # Blue
-    7: (0.90, 0.00, 0.00),  # Red
+    key: tuple(channel / 255 for channel in rgb)
+    for key, rgb in {
+        0: (0, 0, 0), 1: (144, 144, 144), 2: (255, 255, 255),
+        3: (254, 253, 96), 4: (169, 250, 92), 5: (255, 85, 207),
+        6: (48, 74, 224), 7: (194, 49, 50), 8: (0, 0, 0),
+        10: (145, 218, 113), 11: (116, 210, 232),
+        12: (192, 127, 210), 13: (250, 231, 25),
+    }.items()
 }
-
 DEFAULT_PEN_COLOR: Tuple[float, float, float] = (0.0, 0.0, 0.0)
 
-# Dynamic highlight colors (used when color_int == 9)
-HIGHLIGHT_COLOR_POOL: list[Tuple[float, float, float]] = [
-    (1.0, 0.60, 0.80),   # Light pink
-    (1.0, 0.50, 0.00),   # Orange
-    (0.10, 0.78, 0.78),  # Teal
-    (0.75, 0.75, 0.75),  # Gray
-]
 
 def pen_color_to_rgb(color_int: int) -> Tuple[float, float, float]:
-    """
-    Convert a reMarkable pen color code to an RGB tuple.
-
-    Args:
-        color_int: Integer color code from reMarkable stroke data.
-
-    Returns:
-        Tuple[float, float, float]: RGB values in range [0, 1].
-
-    Notes:
-        - Color code 9 is treated as a highlight and mapped randomly.
-        - Unknown codes fallback to DEFAULT_PEN_COLOR.
-    """
-    if color_int == 9:
-        return random.choice(HIGHLIGHT_COLOR_POOL)
+    # ID 9 requires explicit RGBA; unknown/missing colors fall back deterministically.
     return PEN_COLOR_MAP.get(color_int, DEFAULT_PEN_COLOR)
 
 # =============================================================================================================================

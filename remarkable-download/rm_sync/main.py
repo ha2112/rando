@@ -46,11 +46,10 @@ runs reuse cached files; rsync's incremental transfer handles updates.
 Render state
 ------------
 A JSON manifest ``.RM_FILES/.rm_render_state.json`` maps each UUID to its last
-known output path and the modification times of every source file that feeds the
-render.  The pipeline uses this to:
+known output path, source content hashes, and renderer/settings signature.  The pipeline uses this to:
 
 * **Skip unchanged documents** — only re-render when at least one source file
-  has been modified since the last run.
+  has changed since the last run, or the renderer/settings signature changes.
 * **Clean up renamed documents** — delete the stale PDF when a document is
   renamed on the tablet.
 * **Move trashed documents** — when ``parent == "trash"`` is detected in a
@@ -64,6 +63,7 @@ those specific documents to re-render regardless of state.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import subprocess
@@ -77,7 +77,7 @@ from client import FileDownloader, RsyncClient, resolve_alias
 from config import _BASE_DIR, DONE_DIR, PROFILE_ORDER, PROFILES, RM_ROOT, UUIDS
 from models import PageInfo
 from parser import DocumentParser, StrokeProcessor
-from renderer import PDFRenderer
+from renderer import PDFRenderer, RENDERER_REVISION, render_settings_signature
 
 
 # ---------------------------------------------------------------------------
@@ -199,22 +199,23 @@ class RenderStateTracker:
     """Tracks rendered document state for change detection and trash handling.
 
     Persists a JSON manifest at ``cache_dir/.rm_render_state.json`` that maps
-    each UUID to its last-known output path and source-file modification times.
+    each UUID to its last-known output path and source content fingerprints.
     The manifest is written atomically (tmp → replace) so a crash mid-save
     never leaves a corrupt file.
 
     Change detection
     ~~~~~~~~~~~~~~~~
-    Before rendering, :meth:`needs_render` compares the stored ``file_mtimes``
-    snapshot against the current mtimes of::
+    Before rendering, :meth:`needs_render` compares stored content hashes
+    against the current bytes of::
 
         <uuid>.metadata   ← name / parent / type
         <uuid>.content    ← page structure
         <uuid>.pdf        ← base PDF (may be absent)
         <uuid>.pagedata   ← template info (may be absent)
-        <uuid>/           ← directory mtime, changes whenever any .rm file changes
+        <uuid>/*.rm       ← each page's content hash
 
-    Any difference (new file, deleted file, changed mtime) triggers a re-render.
+    Content hashes, renderer revision, and settings changes trigger a re-render.
+    Old mtime-only entries are invalidated on the first upgraded render.
 
     Trash handling
     ~~~~~~~~~~~~~~
@@ -284,32 +285,21 @@ class RenderStateTracker:
     # Fingerprinting
     # ------------------------------------------------------------------
 
-    def _fingerprint(self, uuid: str) -> Dict[str, float]:
-        """Return ``{filename: mtime}`` for every relevant source file.
-
-        Files that do not exist are omitted, so their appearance or disappearance
-        is detected as a change on the next comparison.
-
-        Args:
-            uuid: Document UUID.
-
-        Returns:
-            Dict mapping filename stem+ext (or ``uuid/``) to ``st_mtime``.
-        """
-        mtimes: Dict[str, float] = {}
-
-        for ext in (".metadata", ".content", ".pdf", ".pagedata"):
-            p = self.cache_dir / f"{uuid}{ext}"
-            if p.exists():
-                mtimes[f"{uuid}{ext}"] = p.stat().st_mtime
-
-        # Directory mtime changes whenever any .rm annotation file inside
-        # is added, removed, or modified — one stat covers the whole page set.
-        d = self.cache_dir / uuid
-        if d.exists():
-            mtimes[f"{uuid}/"] = d.stat().st_mtime
-
-        return mtimes
+    def _fingerprint(self, uuid: str) -> dict:
+        """Hash actual rendering inputs, including in-place edits with preserved mtimes."""
+        paths = [self.cache_dir / f"{uuid}{ext}"
+                 for ext in (".metadata", ".content", ".pdf", ".pagedata")]
+        paths.extend(sorted((self.cache_dir / uuid).glob("*.rm")))
+        files = {}
+        for path in paths:
+            if path.is_file():
+                digest = hashlib.sha256()
+                with path.open("rb") as fh:
+                    for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                files[str(path.relative_to(self.cache_dir))] = digest.hexdigest()
+        return dict(files=files, renderer=RENDERER_REVISION,
+                    settings=render_settings_signature())
 
     # ------------------------------------------------------------------
     # Change detection
@@ -331,7 +321,9 @@ class RenderStateTracker:
         entry = self._state.get(uuid)
         if entry is None:
             return True  # never rendered
-        stored  = entry.get("file_mtimes", {})
+        if not Path(entry.get("output_path", "")).is_file():
+            return True
+        stored = entry.get("fingerprint", {})
         current = self._fingerprint(uuid)
         changed = stored != current
         if changed:
@@ -345,7 +337,7 @@ class RenderStateTracker:
     # State mutations
     # ------------------------------------------------------------------
 
-    def record_rendered(self, uuid: str, output_path: Path) -> None:
+    def record_rendered(self, uuid: str, output_path: Path, *, fidelity_warnings=None) -> None:
         """Store a successful render record for *uuid*.
 
         Captures the current file fingerprint so subsequent calls to
@@ -357,7 +349,9 @@ class RenderStateTracker:
         """
         self._state[uuid] = {
             "output_path": str(output_path),
-            "file_mtimes": self._fingerprint(uuid),
+            "fingerprint": self._fingerprint(uuid),
+            "fidelity_warnings": fidelity_warnings or [],
+            "fidelity": "partial" if fidelity_warnings else "supported",
         }
 
     def get_output_path(self, uuid: str) -> Optional[Path]:
@@ -381,8 +375,7 @@ class RenderStateTracker:
     def handle_rename_if_needed(self, uuid: str, new_output_path: Path) -> None:
         """Delete the stale rendered PDF when a document has been renamed.
 
-        Called *before* rendering so the old file is gone before the new one
-        is written at the updated path.  No-ops when the path has not changed
+        Called after the replacement is safely saved. No-ops when the path has not changed
         or when the old file no longer exists on disk.
 
         Args:
@@ -974,10 +967,6 @@ def _process_document(
             log.info("  ⏭️   Skipping '%s' — no changes detected.", meta.name)
             return False
 
-    # ── Rename cleanup ────────────────────────────────────────────────────────
-    if tracker is not None:
-        tracker.handle_rename_if_needed(doc_uuid, out_path)
-
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Base PDF (optional) ──────────────────────────────────────────────────
@@ -997,11 +986,15 @@ def _process_document(
             stroke_provider=make_stroke_provider(processor, cache_dir, doc_uuid),
         )
         renderer.save(out_path)
-        log.info("  ✅  Saved → %s", out_path)
+        log.info("  ✅  Saved%s → %s",
+                 " (partial fidelity)" if renderer.fidelity_warnings else "", out_path)
 
         # Record the successful render in the manifest
         if tracker is not None:
-            tracker.record_rendered(doc_uuid, out_path)
+            # Keep the old name/output until its replacement has been saved.
+            tracker.handle_rename_if_needed(doc_uuid, out_path)
+            tracker.record_rendered(doc_uuid, out_path,
+                                    fidelity_warnings=renderer.fidelity_warnings)
 
     finally:
         renderer.close()

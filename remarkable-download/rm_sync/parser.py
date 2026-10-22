@@ -11,14 +11,13 @@ Provides two classes for parsing reMarkable document files into Python objects:
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from pymupdf import r
-
-from config import RM_HEIGHT, RM_HALF_WIDTH, RM_WIDTH, RM_HEIGHT_OFFSET, SCALE
+from config import RM_HEIGHT, RM_WIDTH, SCALE
 from models import DocumentMeta, PageInfo, Stroke, Highlight, Point, Rectangle
 
 try:
@@ -201,24 +200,19 @@ class DocumentParser:
 # ---------------------------------------------------------------------------
 
 class StrokeProcessor:
-    """Decodes ``.rm`` v6 binary files and transforms stroke / highlight
-    coordinates from reMarkable device space to PDF point space.
+    """Decode resolved visible scene items and place their measurements.
 
-    Coordinate-system corrections applied
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    **Bug fix #1 — PDF x de-centering:**
-        reMarkable v6 stores x coordinates for PDF-annotation pages with
-        ``x = 0`` at the horizontal canvas midpoint (702 px from the left
-        edge), so raw x values range over ``[-702, +702]``.  Adding
-        ``RM_HALF_WIDTH = 702`` before scaling shifts this to ``[0, 1404]``.
-        Applied only when ``is_pdf_page=True``.
-
-    **Bug fix #2 — CropBox origin offset:**
-        PDFs whose CropBox is inset within a larger MediaBox expose a
-        non-zero ``(x_origin_pt, y_origin_pt)`` offset.  After scaling,
-        every coordinate is translated by this offset so strokes land inside
-        the visible content area rather than at the raw page origin.
+    Notebook x is centered on the decoded SceneInfo.paper_size. PDF annotations
+    use the existing fixed physical scale and center on the target page. Explicit
+    origins are supported for callers working in media-box coordinates; the
+    assembler uses crop-local coordinates. Unknown extension bytes remain exposed.
     """
+
+    def __init__(self):
+        self.paper_size = None
+        self.extensions = []
+        self.missing_source = False
+        self.unsupported_blocks = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -229,10 +223,9 @@ class StrokeProcessor:
     ) -> Tuple[List[Stroke], List[Highlight]]:
         """Parse a single ``.rm`` v6 file into strokes and text highlights.
 
-        The top-level loop owns the **CRDT tombstone check** so that it gates
-        both ``_parse_stroke`` and ``_parse_highlight`` uniformly — the
-        ``temp2.py`` POC omitted this check which would have surfaced deleted
-        ink as phantom strokes.
+        Resolve CRDT item order, tombstones, and layer visibility before rendering.
+        Unreadable blocks and fatal decoding failures raise instead of producing
+        apparently successful empty ink.
 
         Args:
             rm_path: Filesystem path to the ``.rm`` binary file.
@@ -241,69 +234,123 @@ class StrokeProcessor:
             ``Tuple[ List[Stroke], List[Highlight] ]``
 
         Raises:
-            ImportError: If the ``rmscene`` package is not installed.
+            ValueError: For corrupt data or unsupported scene operations.
         """
 
-        # General shits
+        self.paper_size = None
+        self.extensions = []
+        self.missing_source = False
+        self.unsupported_blocks = []
         if not rm_path.exists():
-            log.warning("Missing .rm file — treating as blank page: %s", rm_path)
+            # Untouched notebook pages need not have an .rm file.
+            self.missing_source = True
+            log.warning("Missing .rm file; no recorded ink: %s", rm_path)
             return [], []
-
 
         try:
             with rm_path.open("rb") as fh:
                 raw_blocks = list(rmscene.read_blocks(fh))
+            # Compatibility is limited to the exact observed pair, not all unknown blocks.
+            allowed_extensions = {
+                (14, 3, 3, bytes.fromhex("1c0100000000")),
+                (15, 2, 2, bytes.fromhex("1f000b2f01143f00004f00005401000000")),
+            }
+            unreadable = [(index, b) for index, b in enumerate(raw_blocks)
+                          if b.__class__.__name__ == "UnreadableBlock"]
+            signatures = set()
+            for _, block in unreadable:
+                info = getattr(block, "info", None)
+                signatures.add((getattr(info, "block_type", None),
+                                getattr(info, "min_version", None),
+                                getattr(info, "current_version", None),
+                                getattr(block, "data", None)))
+            if unreadable and (len(unreadable) != 2 or signatures != allowed_extensions):
+                index, block = unreadable[0]
+                raise ValueError(f"Unsupported scene block {index}: {block}")
+            for index, block in enumerate(raw_blocks):
+                if block.__class__.__name__ == "UnreadableBlock":
+                    info = block.info
+                    self.unsupported_blocks.append(dict(block_index=index,
+                        block_type=info.block_type, min_version=info.min_version,
+                        current_version=info.current_version, data=block.data,
+                        error=block.error))
+                    self.extensions.append(dict(block_index=index,
+                        block_type=f"Unknown_0x{info.block_type:02x}", field="data", data=block.data))
+                    log.warning("%s: partial fidelity: preserved unknown block 0x%02x (%d bytes)",
+                                rm_path.name, info.block_type, len(block.data))
+                for field in ("extra_data", "extra_value_data"):
+                    data = getattr(block, field, b"")
+                    if data:
+                        self.extensions.append(dict(block_index=index,
+                            block_type=type(block).__name__, field=field, data=data))
+                if block.__class__.__name__ == "SceneInfo":
+                    self.paper_size = getattr(block, "paper_size", None)
+            tree = rmscene.SceneTree()
+            rmscene.build_tree(tree, raw_blocks)
+            if tree.root_text is not None and any(
+                    not item.deleted_length and isinstance(item.value, str) and item.value
+                    for item in tree.root_text.items.sequence_items()):
+                raise ValueError("Typed scene text is not supported by this renderer")
         except Exception as exc:
-            log.error("Failed to parse %s: %s", rm_path.name, exc)
-            return [], []
+            raise ValueError(f"Failed to decode {rm_path}: {exc}") from exc
 
-        # Extract raw block
+        if self.extensions:
+            log.warning("%s: partial fidelity: %d preserved extension regions (%d bytes)",
+                        rm_path.name, len(self.extensions),
+                        sum(len(r["data"]) for r in self.extensions))
 
-        strokes:    List[Stroke]    = []
-        highlights: List[Highlight] = []
+        # Resolve scene order and visibility before splitting ink and glyphs.
+        source = {b.item.item_id: i for i, b in enumerate(raw_blocks)
+                  if getattr(b, "item", None) is not None}
+        strokes, highlights = [], []
 
-        for block_index, block in enumerate(raw_blocks):
-            # ── gate 1: block must expose an item ────────────────────────────
-            item = getattr(block, "item", None)
-            if item is None:
-                log.debug("Block %d has no item — skipping.", block_index)
-                continue
+        def visit(group, offset=(0.0, 0.0)):
+            if not group.visible.value:
+                return
+            items = {item.item_id: item for item in group.children.sequence_items()}
+            if not any(not item.deleted_length and item.value is not None for item in items.values()):
+                return
+            if group.anchor_id is not None:
+                dx, dy = self._empty_heading_anchor(group, tree.root_text)
+                offset = (offset[0] + dx, offset[1] + dy)
+            for item_id in group.children:
+                item = items[item_id]
+                if item.deleted_length or item.value is None:
+                    continue
+                value = item.value
+                if isinstance(value, rmscene.scene_items.Group):
+                    yield from visit(value, offset)
+                else:
+                    yield item_id, value, offset
 
-            # ── gate 2: CRDT tombstone check (CRITICAL — from parser.py) ─────
-            # Firmware v3+ marks deleted CRDT entries with a non-zero
-            # ``deleted_length``.  Skipping here prevents deleted ink and
-            # deleted highlight annotations from being rendered.
-            if getattr(item, "deleted_length", 0) > 0:
-                log.debug(
-                    "Block %d is a CRDT tombstone (deleted_length > 0) — skipping.",
-                    block_index,
-                )
-                continue
+        for order, (item_id, value, offset) in enumerate(visit(tree.root)):
+            index = source[item_id]
+            parsed = self._parse_stroke(value, index)
+            if parsed is not None:
+                if parsed.tool in (6, 8):
+                    raise ValueError("Unresolved eraser operations require ink masks")
+                strokes.append(replace(parsed, scene_order=order, item_id=str(item_id), scene_offset=offset))
+            else:
+                parsed = self._parse_highlight(value, index)
+                if parsed is not None:
+                    highlights.append(replace(parsed, scene_order=order, item_id=str(item_id), scene_offset=offset))
 
-            # ── gate 3: item must carry a value ──────────────────────────────
-            val = getattr(item, "value", None)
-            if val is None:
-                log.debug("Block %d item has no value — skipping.", block_index)
-                continue
-
-            # ── dispatch: stroke first, then highlight ────────────────────────
-            stroke = self._parse_stroke(val, block_index)
-            if stroke is not None:
-                strokes.append(stroke)
-                continue  # a block is either a stroke *or* a highlight, not both
-
-            highlight = self._parse_highlight(val, block_index)
-            if highlight is not None:
-                highlights.append(highlight)
-
-        
-        log.debug(
-            "%s → %d strokes, %d highlights decoded.",
-            rm_path.name,
-            len(strokes),
-            len(highlights),
-        )
         return strokes, highlights
+
+    @staticmethod
+    def _empty_heading_anchor(group, text):
+        """Resolve the empty-heading profile measured against Nhap copy's export."""
+        from rmscene.tagged_block_common import CrdtId
+        end = CrdtId(0, 0)
+        special = {CrdtId(0, 281474976710654), CrdtId(0, 281474976710655)}
+        if (text is None or set(text.styles) != {end}
+                or text.styles[end].value != rmscene.scene_items.ParagraphStyle.HEADING
+                or group.anchor_id.value not in special
+                or group.anchor_origin_x is None
+                or group.anchor_type is None or group.anchor_type.value != 2):
+            raise ValueError(f"Unsupported anchor profile: {group.node_id}")
+        # All 242 reference paths independently confirm this baseline to <0.001 scene units.
+        return group.anchor_origin_x.value, text.pos_y + 63.1875
 
     def scale_strokes(
         self,
@@ -314,6 +361,7 @@ class StrokeProcessor:
         is_pdf_page: bool = False,
         x_origin_pt: float = 0.0,
         y_origin_pt: float = 0.0,
+        source_size: Optional[Tuple[float, float]] = None,
     ) -> List[Stroke]:
         """
         Convert stroke coordinates from reMarkable device space to PDF point space.
@@ -337,65 +385,30 @@ class StrokeProcessor:
             x_rm_offset = target_width_pt / scale / 2 
         else:
             # Notebook: independent per-axis scale fills the blank page.
-            sx = target_width_pt  / RM_WIDTH
-            sy = target_height_pt / RM_HEIGHT
-            x_rm_offset: float = RM_HALF_WIDTH
+            source_w, source_h = source_size or self.paper_size or (RM_WIDTH, RM_HEIGHT)
+            sx = target_width_pt / source_w
+            sy = target_height_pt / source_h
+            x_rm_offset = source_w / 2
 
         scaled: List[Stroke] = []
         for s in strokes:
             new_points: List[Point] = []
-            for pt in s.points:  # pt is now Point(x, y, pressure) — not a raw tuple
+            dx, dy = s.scene_offset
+            for pt in s.points:
                 # ── x pipeline ───────────────────────────────────────────────
-                x_abs   = pt.x + x_rm_offset   # bug fix #1: de-center PDF coords
+                x_abs   = pt.x + dx + x_rm_offset   # bug fix #1: de-center PDF coords
                 x_scaled = x_abs * sx           # scale rm units → PDF points
                 x_final  = x_scaled + x_origin_pt  # bug fix #2: CropBox offset
 
                 # ── y pipeline ───────────────────────────────────────────────
-                y_scaled = pt.y * sy  # y offset removed
+                y_scaled = (pt.y + dy) * sy  # y offset removed
                 y_final  = y_scaled + y_origin_pt  # bug fix #2: CropBox offset
 
                 # Pressure is a sensor reading, not a coordinate — pass through.
-                new_points.append(Point(x=x_final, y=y_final, pressure=pt.pressure))
+                new_points.append(replace(pt, x=x_final, y=y_final))
 
-            scaled.append(Stroke(
-                tool=s.tool,
-                color=s.color,
-                width=s.width,        
-                points=new_points,
-                block_index=s.block_index,
-            ))
-
-        # -- DEBUG: Add border stroke and middle vertical guide --
-        # border_points = [
-        #     Point(x=x_origin_pt, y=y_origin_pt, pressure=1.0),
-        #     Point(x=x_origin_pt + target_width_pt, y=y_origin_pt, pressure=1.0),
-        #     Point(x=x_origin_pt + target_width_pt, y=y_origin_pt + target_height_pt, pressure=1.0),
-        #     Point(x=x_origin_pt, y=y_origin_pt + target_height_pt, pressure=1.0),
-        #     Point(x=x_origin_pt, y=y_origin_pt, pressure=1.0),  # Close the rectangle
-        # ]
-        # border_stroke = Stroke(
-        #     tool=18,  # or an arbitrary tool for debug
-        #     color=1,   # distinguishable color for debug
-        #     width=1.0,     # make it a thin but visible border
-        #     points=border_points,
-        #     block_index=-1
-        # )
-        # scaled.append(border_stroke)
-
-        # # Add a vertical stroke down the middle
-        # mid_x = x_origin_pt + target_width_pt / 2
-        # vertical_points = [
-        #     Point(x=mid_x, y=y_origin_pt, pressure=1.0),
-        #     Point(x=mid_x, y=y_origin_pt + target_height_pt, pressure=1.0)
-        # ]
-        # middle_stroke = Stroke(
-        #     tool=18,    # same debug tool
-        #     color=2,    # another distinguishable color for guide
-        #     width=1.0,
-        #     points=vertical_points,
-        #     block_index=-1
-        # )
-        # scaled.append(middle_stroke)
+            scaled.append(replace(s, points=new_points, scene_offset=(0.0, 0.0),
+                geometry_scale=(s.geometry_scale[0] * sx, s.geometry_scale[1] * sy)))
 
         return scaled
 
@@ -408,6 +421,7 @@ class StrokeProcessor:
         is_pdf_page: bool = False,
         x_origin_pt: float = 0.0,
         y_origin_pt: float = 0.0,
+        source_size: Optional[Tuple[float, float]] = None,
     ) -> List[Highlight]:
         """Convert highlight rectangle coordinates from reMarkable device space to PDF point space.
 
@@ -433,29 +447,26 @@ class StrokeProcessor:
             x_rm_offset = target_width_pt / scale / 2.0 
         else:
             # Notebook: independent per-axis scale fills the blank page.
-            sx = target_width_pt  / RM_WIDTH
-            sy = target_height_pt / RM_HEIGHT
-            x_rm_offset: float = RM_HALF_WIDTH
+            source_w, source_h = source_size or self.paper_size or (RM_WIDTH, RM_HEIGHT)
+            sx = target_width_pt / source_w
+            sy = target_height_pt / source_h
+            x_rm_offset = source_w / 2
 
         scaled: List[Highlight] = []
         for h in highlights:
             new_rects: List[Rectangle] = []
+            dx, dy = h.scene_offset
             for r in h.rectangles:
-                # Transform rectangle origin
-                x_final = (r.x + x_rm_offset) * sx + x_origin_pt
-                y_final = r.y * sy + y_origin_pt  # y offset removed
+                # Transform rectangle origin and consume the scene-group translation.
+                x_final = (r.x + dx + x_rm_offset) * sx + x_origin_pt
+                y_final = (r.y + dy) * sy + y_origin_pt  # y offset removed
          
                 w_final = r.w * sx
                 h_final = r.h * sy
 
                 new_rects.append(Rectangle(x=x_final, y=y_final, w=w_final, h=h_final))
 
-            scaled.append(Highlight(
-                text=h.text,
-                color=h.color,
-                rectangles=new_rects,
-                block_index=h.block_index,
-            ))        
+            scaled.append(replace(h, rectangles=new_rects, scene_offset=(0.0, 0.0)))
 
         return scaled
 
@@ -491,7 +502,10 @@ class StrokeProcessor:
                 Point(
                     x=float(x),
                     y=float(y),
-                    pressure=getattr(p, "pressure", None),  # None if unsupported
+                    pressure=getattr(p, "pressure", None),
+                    width=getattr(p, "width", None),
+                    speed=getattr(p, "speed", None),
+                    direction=getattr(p, "direction", None),
                 )
             )
 
@@ -501,18 +515,19 @@ class StrokeProcessor:
         # Cast IntEnum → plain int for arithmetic safety (from original parser)
         try:
             color = int(val.color)
-        except (TypeError, ValueError):
-            color = 0
+        except (AttributeError, TypeError, ValueError):
+            color = None
 
         try:
             tool = int(val.tool)
-        except (TypeError, ValueError):
-            tool = 0
+        except (AttributeError, TypeError, ValueError):
+            tool = None
 
         return Stroke(
             tool=tool,
             color=color,
-            width=float(getattr(val, "width", 1.0) or 1.0),
+            thickness_scale=getattr(val, "thickness_scale", None),
+            color_rgba=getattr(val, "color_rgba", None),
             points=parsed_points,
             block_index=block_index,
         )
@@ -552,6 +567,7 @@ class StrokeProcessor:
 
         return Highlight(
             text=text,
+            color_rgba=getattr(val, "color_rgba", None),
             color=getattr(val, "color", None),
             rectangles=rectangles,
             block_index=block_index,

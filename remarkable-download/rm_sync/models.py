@@ -17,70 +17,29 @@ from typing import FrozenSet, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 
 class PenType(IntEnum):
-    """reMarkable tool/pen type identifiers as used in rmscene v6 Pen enum.
+    """Tool identities verified against rmscene.scene_items.Pen."""
 
-    Values match the ``Pen`` IntEnum in the ``rmscene`` library source
-    (``scene_stream.py``).  Both version-1 (legacy) and version-2 (current
-    firmware) variants are listed where they differ.
-
-    Attributes:
-        PAINTBRUSH_1:        Original brush (pressure-sensitive).
-        PENCIL_1:            Original pencil.
-        BALLPOINT_1:         Original ballpoint.
-        MARKER_1:            Original marker (felt tip).
-        FINELINER_1:         Original fineliner.
-        HIGHLIGHTER:         Primary highlighter tool (firmware v2+). **Key for
-                             bug fix #4** — strokes with this tool ID must be
-                             rendered as translucent wide highlights.
-        ERASER:              Standard eraser.
-        MECH_PENCIL_1:       Mechanical pencil v1.
-        ERASER_AREA:         Rectangle eraser.
-        PAINTBRUSH_2:        Updated brush.
-        MECH_PENCIL_2:       Mechanical pencil v2.
-        PENCIL_2:            Updated pencil.
-        BALLPOINT_2:         Updated ballpoint.
-        FINELINER_2:         Updated fineliner.
-        MARKER_2:            Updated marker.
-        HIGHLIGHTER_2:       Updated highlighter. Also covered by bug fix #4.
-        CALLIGRAPHY:         Calligraphy pen.
-        SHADER:              Shader / fill tool.
-    """
-
-    PAINTBRUSH_1  = 12
-    PENCIL_1      = 14
-    BALLPOINT_1   = 15
-    MARKER_1      = 16
-    FINELINER_1   = 17
-    HIGHLIGHTER   = 18    # ← primary highlighter (bug fix #4)
-    ERASER        = 0
-    MECH_PENCIL_1 = 13
-    ERASER_AREA   = 0
-    PAINTBRUSH_2  = 12
+    PAINTBRUSH_1 = 0
+    PENCIL_1 = 1
+    BALLPOINT_1 = 2
+    MARKER_1 = 3
+    FINELINER_1 = 4
+    HIGHLIGHTER = 5
+    ERASER = 6
+    MECH_PENCIL_1 = 7
+    ERASER_AREA = 8
+    PAINTBRUSH_2 = 12
     MECH_PENCIL_2 = 13
-    PENCIL_2      = 14
-    BALLPOINT_2   = 15
-    FINELINER_2   = 17
-    MARKER_2      = 16
-    HIGHLIGHTER_2 = 18   # ← updated highlighter (bug fix #4)
-    CALLIGRAPHY   = 21
-    SHADER        = 23
+    PENCIL_2 = 14
+    BALLPOINT_2 = 15
+    MARKER_2 = 16
+    FINELINER_2 = 17
+    HIGHLIGHTER_2 = 18
+    CALLIGRAPHY = 21
+    SHADER = 23
 
 
-# ---------------------------------------------------------------------------
-# Highlight detection sets
-# ---------------------------------------------------------------------------
-
-#: Tool IDs whose strokes should be rendered as highlights (bug fix #4).
-HIGHLIGHT_TOOL_IDS: FrozenSet[int] = frozenset({
-    int(PenType.HIGHLIGHTER),    
-    int(PenType.HIGHLIGHTER_2),  
-})
-
-#: Color indices that represent highlight colours (yellow=3, green=4, pink=5).
-#: Used as a secondary detection path when the tool ID alone is ambiguous
-#: (e.g., older .rm files that encode the highlighter with a different tool ID
-#: but always use one of the three standard highlight colours).
-HIGHLIGHT_COLOR_IDS: FrozenSet[int] = frozenset({3, 4, 5})
+HIGHLIGHT_TOOL_IDS: FrozenSet[int] = frozenset({5, 18})
 
 
 # ---------------------------------------------------------------------------
@@ -161,48 +120,32 @@ class Point:
     x: float
     y: float
     pressure: Optional[float] = None
+    width: Optional[float] = None
+    speed: Optional[float] = None
+    direction: Optional[float] = None
 
 @dataclass
 class Stroke:
-    """A single decoded stroke from an ``.rm`` binary file.
+    """Decoded measurements remain in rmscene units even after placement.
 
-    Coordinates in ``points`` are in whichever space the producing code
-    placed them (raw device units from ``StrokeProcessor.decode_rm_file``, or
-    transformed PDF-point coordinates from ``StrokeProcessor.scale_strokes``).
-
-    Attributes:
-        tool:            Integer tool/pen ID (see :class:`PenType`).
-        color:           Integer colour index (see ``PEN_COLOR_MAP`` in
-            ``config.py``).
-        thickness_scale: Pen pressure / size multiplier baked into the stroke
-            by the device.  Typical range 0.5 – 3.0.
-        points:          Ordered list of ``(x, y)`` coordinate pairs.
+    geometry_scale transforms the circular scene nib along with its center.
+    Pressure is raw (0..255), width is quarter scene units; direction is not tilt.
     """
 
     tool: Optional[int]
     color: Optional[int]
-    width: Optional[float]
+    thickness_scale: Optional[float]
     points: List[Point]
     block_index: int
+    color_rgba: Optional[Tuple[int, int, int, int]] = None
+    geometry_scale: Tuple[float, float] = (1.0, 1.0)
+    scene_order: int = 0
+    item_id: Optional[str] = None
+    scene_offset: Tuple[float, float] = (0.0, 0.0)
 
     @property
     def is_highlight(self) -> bool:
-        """Return ``True`` if this stroke was drawn with a highlighter tool.
-
-        Detection uses two independent signals joined by OR, making it robust
-        against tool-ID variations across firmware versions (bug fix #4):
-
-        1. ``self.tool`` is in :data:`HIGHLIGHT_TOOL_IDS` (primary check).
-        2. ``self.color`` is in :data:`HIGHLIGHT_COLOR_IDS` — yellow, green, or
-           pink (secondary / fallback check).
-
-        Returns:
-            bool: ``True`` when either signal fires.
-        """
-        return (
-            self.tool in HIGHLIGHT_TOOL_IDS
-            or self.color in HIGHLIGHT_COLOR_IDS
-        )
+        return self.tool in HIGHLIGHT_TOOL_IDS
 
 
 @dataclass
@@ -211,6 +154,10 @@ class Highlight:
     color: Optional[int]
     rectangles: List[Rectangle]
     block_index: int
+    color_rgba: Optional[Tuple[int, int, int, int]] = None
+    scene_order: int = 0
+    item_id: Optional[str] = None
+    scene_offset: Tuple[float, float] = (0.0, 0.0)
 
 @dataclass
 class Rectangle:

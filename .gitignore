@@ -159,3 +159,5 @@ test_data/
 *.err
 
 *.plist
+
+*/rm-sync-analysis/*

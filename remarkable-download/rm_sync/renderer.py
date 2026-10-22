@@ -6,36 +6,45 @@ PDF assembler using PyMuPDF to overlay stroke and highlight data onto PDF pages.
 PDFRenderer does the following:
 1. Sequences pages in CRDT order, inserting blanks for interleaved notes.
 2. Delegates coordinate transformation to StrokeProcessor using correct PDF/page settings.
-3. Renders highlighter strokes as semi-transparent wide polylines with blending (Multiply) when supported, tinting background without obscuring text.
+3. Renders measured vector ink, preserving explicit RGBA. Non-target brushes
+   use an explicitly reported approximation; blend/texture calibration is deferred.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+from importlib.metadata import version
+import tempfile
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import fitz  # PyMuPDF
 
-from config import (
-    BASE_LINE_WIDTH,
-    BLANK_PAGE_HEIGHT_PT,
-    BLANK_PAGE_WIDTH_PT,
-    HIGHLIGHT_OPACITY_BLEND,
-    HIGHLIGHT_OPACITY_PLAIN,
-    HIGHLIGHT_WIDTH_MIN,
-    HIGHLIGHT_WIDTH_SCALE,
-    MIN_LINE_WIDTH,
-    pen_color_to_rgb,
-)
+from config import (BLANK_PAGE_HEIGHT_PT, BLANK_PAGE_WIDTH_PT, SCALE,
+                    HIGHLIGHT_OPACITY_PLAIN, PEN_COLOR_MAP)
+from brushes import draw_ink, glyph_highlight_color, painted_bounds
+
 from models import Highlight, PageInfo, Stroke
 from parser import StrokeProcessor
 
 log = logging.getLogger("rm-rebuilder.renderer")
 
+# Bump when geometry, palette, or brush behavior changes.
+RENDERER_REVISION = "pen-measurements-v3-snapped-highlight-blending"
+
+
+def render_settings_signature():
+    settings = (BLANK_PAGE_WIDTH_PT, BLANK_PAGE_HEIGHT_PT, SCALE,
+                HIGHLIGHT_OPACITY_PLAIN, PEN_COLOR_MAP,
+                fitz.VersionBind, version("rmscene"))
+    return hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()
+
 
 class PDFRenderer:
     def __init__(self) -> None:
         self._doc: Optional[fitz.Document] = None
+        self.fidelity_warnings = []
 
     # ==========================================================
     # PUBLIC ENTRYPOINT
@@ -51,6 +60,18 @@ class PDFRenderer:
 
         for page_index, page_info in enumerate(pages):
             strokes, highlights = stroke_provider(page_info)
+            fallback_tools = sorted({s.tool for s in strokes if s.tool not in (2, 4, 15, 17)},
+                                    key=lambda tool: -1 if tool is None else tool)
+            if fallback_tools:
+                log.warning("%s: approximate brush appearance for tools %s",
+                            page_info.uuid, fallback_tools)
+            if processor.extensions or fallback_tools or processor.missing_source:
+                self.fidelity_warnings.append(dict(page=page_info.uuid,
+                    extension_regions=len(processor.extensions),
+                    extension_bytes=sum(len(r["data"]) for r in processor.extensions),
+                    approximate_tools=fallback_tools, missing_source=processor.missing_source,
+                    unsupported_blocks=[dict(b, data=b["data"].hex())
+                                        for b in processor.unsupported_blocks]))
 
             is_pdf = page_info.redir is not None and base_doc is not None
 
@@ -85,11 +106,15 @@ class PDFRenderer:
             target_w = float(crop.width)
             target_h = float(crop.height)
 
-            x_origin = float(crop.x0)
-            y_origin = float(crop.y0)
+            x_origin = 0.0
+            y_origin = 0.0
         else:
-            target_w = BLANK_PAGE_WIDTH_PT
-            target_h = BLANK_PAGE_HEIGHT_PT
+            if processor.paper_size:
+                target_w = processor.paper_size[0] * SCALE
+                target_h = processor.paper_size[1] * SCALE
+            else:
+                target_w = BLANK_PAGE_WIDTH_PT * SCALE
+                target_h = BLANK_PAGE_HEIGHT_PT * SCALE
             x_origin = 0.0
             y_origin = 0.0
         
@@ -121,21 +146,21 @@ class PDFRenderer:
         content_bbox = self._compute_content_bbox(
             scaled_strokes,
             scaled_highlights,
-            base_rect=(
-                src_page.cropbox if is_pdf_page else
-                fitz.Rect(0, 0, target_w, target_h)
-            )
+            base_rect=fitz.Rect(0, 0, target_w, target_h)
         )
 
-        # margin (tunable)
-        MARGIN = 40
-
-        final_bbox = fitz.Rect(
-            content_bbox.x0 - MARGIN,
-            content_bbox.y0 - MARGIN,
-            content_bbox.x1 + MARGIN,
-            content_bbox.y1 + MARGIN,
-        )
+        if not is_pdf_page:
+            # Keep the notebook origin; never fit low-positioned ink to the top.
+            # Native extended-page padding is empirical, verified on Pen page 2.
+            if content_bbox.y1 > target_h:
+                content_bbox.y1 = max(content_bbox.y1,
+                    max((p.y for s in scaled_strokes for p in s.points), default=0) + 50 * SCALE)
+            painted = self._compute_content_bbox(scaled_strokes, scaled_highlights,
+                                                 fitz.Rect(0, 0, 0, 0))
+            # Round nominal dimensions, while retaining all painted extents.
+            content_bbox.x1 = max(round(target_w), painted.x1)
+            content_bbox.y1 = max(round(target_h), round(content_bbox.y1), painted.y1)
+        final_bbox = content_bbox
 
         # ------------------------------------------------------
         # 4. CREATE FITTED PAGE
@@ -151,26 +176,8 @@ class PDFRenderer:
         # 5. DRAW ORIGINAL PDF CONTENT
         # ------------------------------------------------------
         if is_pdf_page:
-            src_page = base_doc[page_info.redir]
-            try:
-                content_bbox = src_page.get_contents_bbox()
-            except AttributeError:
-                content_bbox = src_page.cropbox
-
-            target_rect = fitz.Rect(
-                content_bbox.x0 + dx,
-                content_bbox.y0 + dy,
-                content_bbox.x1 + dx,
-                content_bbox.y1 + dy,
-            )
-   
-            # Draw only the CropBox area of the source page onto the new page.
-            new_page.show_pdf_page(
-                target_rect,
-                base_doc,
-                page_info.redir,
-                clip=crop,
-            )
+            target_rect = fitz.Rect(dx, dy, target_w + dx, target_h + dy)
+            new_page.show_pdf_page(target_rect, base_doc, page_info.redir, clip=src_page.rect)
 
         # ------------------------------------------------------
         # 6. SHIFT + DRAW STROKES
@@ -185,19 +192,7 @@ class PDFRenderer:
                 r.x += dx
                 r.y += dy
 
-        for stroke in scaled_strokes:
-            if not stroke.points:
-                continue
-
-            if len(stroke.points) == 1:
-                self._draw_dot(new_page, stroke)
-            elif stroke.is_highlight:
-                self._draw_highlight(new_page, stroke)
-            else:
-                self._draw_stroke(new_page, stroke)
-
-        for highlight in scaled_highlights:
-            self._draw_glyph_highlight(new_page, highlight)
+        self._draw_items(new_page, scaled_strokes, scaled_highlights)
 
     # ==========================================================
     # BOUNDING BOX LOGIC
@@ -213,9 +208,10 @@ class PDFRenderer:
 
         # strokes
         for s in strokes:
-            for p in s.points:
-                xs.append(p.x)
-                ys.append(p.y)
+            if s.points:
+                x0, y0, x1, y1 = painted_bounds(s)
+                xs.extend([x0, x1])
+                ys.extend([y0, y1])
 
         # highlights
         for h in highlights:
@@ -309,26 +305,14 @@ class PDFRenderer:
             y_origin_pt=y_origin,
         )
 
-        # ── Render ink strokes ────────────────────────────────────────────
-        for stroke in scaled_strokes:
-            if not stroke.points:
-                continue
+        self._draw_items(page, scaled_strokes, scaled_highlights)
 
-            if len(stroke.points) == 1:
-                # Single-point tap: render as a small filled circle
-                self._draw_dot(page, stroke)
-                continue
-
-            if stroke.is_highlight:
-                # Highlighter-tool stroke: wide + transparent + Multiply blend
-                self._draw_highlight(page, stroke)
+    def _draw_items(self, page, strokes, highlights):
+        for item in sorted([*strokes, *highlights], key=lambda item: item.scene_order):
+            if isinstance(item, Highlight):
+                self._draw_glyph_highlight(page, item)
             else:
-                # Normal stroke: thin opaque polyline
-                self._draw_stroke(page, stroke)
-
-        # ── Render GlyphRange text-selection highlights ───────────────────
-        for highlight in scaled_highlights:
-            self._draw_glyph_highlight(page, highlight)
+                self._draw_stroke(page, item)
 
     # ------------------------------------------------------------------
     # Output
@@ -342,12 +326,14 @@ class PDFRenderer:
         """
    
         log.info("Saving → %s", output_path)
-        self._doc.save(
-            str(output_path),
-            garbage=4,     # purge unused objects left by insert_pdf copies
-            deflate=True,  # compress all content streams
-            clean=True,    # sanitise content stream syntax
-        )
+        # Replace only after the complete PDF has been written successfully.
+        with tempfile.NamedTemporaryFile(dir=output_path.parent, suffix=".pdf", delete=False) as fh:
+            temporary = Path(fh.name)
+        try:
+            self._doc.save(str(temporary), garbage=4, deflate=True, clean=True)
+            temporary.replace(output_path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def close(self) -> None:
         """Release the :class:`fitz.Document` handle."""
@@ -359,209 +345,49 @@ class PDFRenderer:
     # Private drawing helpers
     # ------------------------------------------------------------------
 
-    # ── helpers ───────────────────────────────────────────────────────────────
-
-    def _smooth_points(self, pts: list[fitz.Point], width: float) -> list[fitz.Point]:
-        """
-        Catmull-Rom spline resampling for small-brush strokes.
-        Only applied when width is below a threshold; otherwise returns pts as-is.
-        Reduces micro-jitter without visibly altering the stroke shape.
-        """
-        SMOOTH_THRESHOLD = 2.0   # pt — tune to taste
-        MIN_POINTS = 4
-
-        if width >= SMOOTH_THRESHOLD or len(pts) < MIN_POINTS:
-            return pts
-
-        smoothed = [pts[0]]
-        for i in range(1, len(pts) - 2):
-            p0, p1, p2, p3 = pts[i-1], pts[i], pts[i+1], pts[i+2]
-            # Catmull-Rom tangents → cubic Bézier control points
-            c1 = fitz.Point(p1.x + (p2.x - p0.x) / 6, p1.y + (p2.y - p0.y) / 6)
-            c2 = fitz.Point(p2.x - (p3.x - p1.x) / 6, p2.y - (p3.y - p1.y) / 6)
-            # Evaluate at t=0.5 as an extra interpolated point
-            mid = fitz.Point(
-                0.125*p0.x + 0.375*p1.x + 0.375*p2.x + 0.125*p3.x,
-                0.125*p0.y + 0.375*p1.y + 0.375*p2.y + 0.125*p3.y,
-            )
-            smoothed.extend([c1, mid, c2])
-        smoothed.append(pts[-1])
-        return smoothed
-
-
-    # ── replace _draw_stroke ───────────────────────────────────────────────────
-
     def _draw_stroke(self, page: fitz.Page, stroke: Stroke) -> None:
-        """Render a normal stroke as an opaque polyline with round caps AND round joins.
-
-        Migrated from page.draw_polyline() to shape-based drawing so that lineJoin=1
-        (round) can be applied. Without round joins, segment junctions produce sharp
-        miter spikes that are visually prominent on thin/small-brush strokes.
-
-        For small widths an optional Catmull-Rom smoothing pass is applied first to
-        reduce micro-jitter from closely sampled stylus points.
-        """
-        r, g, b = pen_color_to_rgb(stroke.color)
-        color   = (r, g, b)
-        width   = max(MIN_LINE_WIDTH, BASE_LINE_WIDTH * stroke.width)
-        pts = [fitz.Point(pt.x, pt.y) for pt in stroke.points]
-
-        # Detect closed geometric shapes (rectangle/triangle/etc.)
-        is_closed = (
-            len(pts) >= 4 and
-            abs(pts[0].x - pts[-1].x) < 1 and
-            abs(pts[0].y - pts[-1].y) < 1
-        )
-
-        # ONLY smooth non-closed strokes
-        if not is_closed:
-            pts = self._smooth_points(pts, width)
-
-        try:
-            shape = page.new_shape()
-
-            if is_closed:
-                # Remove duplicated closing point
-                shape.draw_polyline(pts[:-1])
-            else:
-                shape.draw_polyline(pts)
-
-            shape.finish(
-                color=color,
-                width=width,
-                lineCap=1,
-                lineJoin=1,
-                closePath=is_closed,
-            )
-
-            shape.commit()
-        except Exception as exc:
-            log.warning("draw_stroke failed: %s", exc)
+        draw_ink(page, stroke)
 
     def _draw_highlight(self, page: fitz.Page, stroke: Stroke) -> None:
-        """Render a highlighter stroke as a wide, semi-transparent polyline.
-
-        Attempts to use the PDF "Multiply" blend mode for realistic highlighter
-        appearance (background tinted, text remains sharp and legible). If the
-        PyMuPDF version does not support blend_mode, falls back to lower opacity.
-
-        Args:
-            page:   fitz.Page to draw on.
-            stroke: Stroke object (should be a highlight), with pre-scaled coordinates.
-        """
-   
-        r, g, b = pen_color_to_rgb(stroke.color)
-        color   = (r, g, b)
-        # Highlighter strokes are rendered wider to cover text lines and scaled according to the user's brush size.
- 
-        width = max(HIGHLIGHT_WIDTH_MIN, HIGHLIGHT_WIDTH_SCALE * stroke.width)
-        pts   = [fitz.Point(pt.x, pt.y) for pt in stroke.points]
-        try:
-            shape = page.new_shape()
-            shape.draw_polyline(pts)
-            shape.finish(
-                color=color,
-                width=width,
-                stroke_opacity=HIGHLIGHT_OPACITY_BLEND,
-                blend_mode="Multiply",
-                lineCap=1,
-                closePath = False,
-            )
-            shape.commit()
-            return
-        except TypeError:
-            log.debug("Multiply blend mode unavailable; using plain opacity fallback.")
-        except Exception as exc:
-            log.warning("Highlight (blend mode path) failed: %s", exc)
-   
-        try:
-            shape = page.new_shape()
-            shape.draw_polyline(pts)
-            shape.finish(
-                color=color,
-                width=width,
-                stroke_opacity=HIGHLIGHT_OPACITY_PLAIN, 
-                lineCap=1,
-                closePath = False,
-            )
-            shape.commit()
-        except Exception as exc:
-            log.warning("Highlight (fallback path) also failed: %s", exc)
+        # Explicit RGBA is authoritative; Multiply calibration is a later gate.
+        draw_ink(page, stroke)
 
     def _draw_dot(self, page: fitz.Page, stroke: Stroke) -> None:
-        """Render a single-point stroke as a small filled circle.
-
-        Args:
-            page:   Target :class:`fitz.Page`.
-            stroke: :class:`~models.Stroke` with exactly one point in
-                pre-scaled coordinates.
-        """
-        r, g, b = pen_color_to_rgb(stroke.color)
-        pt      = stroke.points[0]
-        # Radius is at minimum 0.5 pt; scales gently with width
-        radius  = max(0.5, 0.75 * stroke.width)
-        page.draw_circle(
-            fitz.Point(pt.x, pt.y),
-            radius,
-            color=(r, g, b),
-            fill=(r, g, b),
-        )
+        draw_ink(page, stroke)
 
     def _draw_glyph_highlight(self, page: fitz.Page, highlight: Highlight) -> None:
-        """Render a text highlight as filled rectangles with blend/opacity fallback.
-
-        Draws each rectangle in the highlight with semi-transparent fill, using
-        Multiply blend mode if available for best text readability, else plain opacity.
-
-        Args:
-            page:      fitz.Page to draw on.
-            highlight: Highlight object with pre-scaled rectangles.
-        """
-   
         if not highlight.rectangles:
             return
+        color, opacity = glyph_highlight_color(highlight)
+        shape = page.new_shape()
+        for rect in highlight.rectangles:
+            shape.draw_rect(fitz.Rect(rect.x, rect.y, rect.x + rect.w, rect.y + rect.h))
+        shape.finish(color=None, fill=color, fill_opacity=opacity, closePath=False)
+        shape.commit()
+        self._multiply_highlight_stream(page, page.get_contents()[-1])
 
-        r, g, b = pen_color_to_rgb(highlight.color)
-        color   = (r, g, b)
-
-        # ── Attempt 1: Multiply blend mode (PyMuPDF >= 1.24) ─────────────
-        try:
-            shape = page.new_shape()
-            for rect in highlight.rectangles:
-                # fitz.Rect takes (x0, y0, x1, y1)
-                shape.draw_rect(
-                    fitz.Rect(rect.x, rect.y, rect.x + rect.w, rect.y + rect.h)
-                )
-            shape.finish(
-                fill=color,
-                color=None,           # no border stroke, fill only
-                fill_opacity=HIGHLIGHT_OPACITY_BLEND,
-                blend_mode="Multiply",
-                closePath = False,
-            )
-            shape.commit()
-            return
-        except TypeError:
-            log.debug(
-                "Multiply blend mode unavailable (PyMuPDF < 1.24); "
-                "using opacity fallback for glyph highlight."
-            )
-        except Exception as exc:
-            log.warning("GlyphRange highlight (blend mode path) failed: %s", exc)
-
-        # ── Attempt 2: Plain opacity fallback ────────────────────────────
-        try:
-            shape = page.new_shape()
-            for rect in highlight.rectangles:
-                shape.draw_rect(
-                    fitz.Rect(rect.x, rect.y, rect.x + rect.w, rect.y + rect.h)
-                )
-            shape.finish(
-                fill=color,
-                color=None,
-                fill_opacity=HIGHLIGHT_OPACITY_PLAIN,
-                closePath = False,
-            )
-            shape.commit()
-        except Exception as exc:
-            log.warning("GlyphRange highlight (fallback path) also failed: %s", exc)
+    @staticmethod
+    def _multiply_highlight_stream(page: fitz.Page, stream_xref: int) -> None:
+        # Shape.finish has no blend-mode argument. Use a real PDF graphics state.
+        doc = page.parent
+        resource_type, resources = doc.xref_get_key(page.xref, "Resources")
+        if resource_type == "xref":
+            resource_xref = int(resources.split()[0])
+        else:
+            resource_xref = doc.get_new_xref()
+            doc.update_object(resource_xref, resources if resource_type == "dict" else "<<>>")
+            doc.xref_set_key(page.xref, "Resources", f"{resource_xref} 0 R")
+        state_xref = doc.get_new_xref()
+        doc.update_object(state_xref, "<< /Type /ExtGState /BM /Multiply >>")
+        owner = resource_xref
+        prefix = "ExtGState/"
+        kind, value = doc.xref_get_key(resource_xref, "ExtGState")
+        if kind == "xref":
+            owner, prefix = int(value.split()[0]), ""
+        name = f"RMSnappedHighlight{state_xref}"
+        while doc.xref_get_key(owner, prefix + name)[0] != "null":
+            name += "X"
+        doc.xref_set_key(owner, prefix + name, f"{state_xref} 0 R")
+        data = doc.xref_stream(stream_xref)
+        # Limit Multiply to this mark, preserving the graphics state for later ink.
+        doc.update_stream(stream_xref, b"q\n/" + name.encode("ascii") + b" gs\n" + data + b"\nQ\n")
