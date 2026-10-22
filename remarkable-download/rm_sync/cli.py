@@ -74,7 +74,7 @@ def callback(
         False,
         "--verbose",
         "-v",
-        help="Enable DEBUG-level logging",
+        help="Show diagnostic logs, including warnings and debug tracebacks",
     ),
 ) -> None:
     """reMarkable sync and render tool."""
@@ -83,10 +83,14 @@ def callback(
     ctx.obj["force"] = force
     ctx.obj["verbose"] = verbose
 
-    if verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-    else:
-        logging.getLogger().setLevel(logging.INFO)
+    # Keep normal output concise; verbose includes dependency diagnostics.
+    level = logging.DEBUG if verbose else logging.ERROR
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    # Also reset the level when the CLI runs again in the same process.
+    logging.getLogger().setLevel(level)
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +236,7 @@ def sync(
                 skipped += 1
         except Exception as exc:
             console.print(f"[red]Failed:[/red] '{doc_name}' ({doc_uuid[:12]}…) — {exc}")
-            log.exception("Error processing %s", doc_uuid)
+            log.debug("Error processing %s", doc_uuid, exc_info=True)
             errors.append((doc_name, doc_uuid, exc))
 
     if not uuids:
@@ -481,7 +485,7 @@ def render(
                 skipped += 1
         except Exception as exc:
             console.print(f"[red]Failed:[/red] '{doc_name}' ({doc_uuid[:12]}…) — {exc}")
-            log.exception("Error processing %s", doc_uuid)
+            log.debug("Error processing %s", doc_uuid, exc_info=True)
             errors.append((doc_name, doc_uuid, exc))
 
     tracker.save()

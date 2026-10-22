@@ -84,10 +84,6 @@ from renderer import PDFRenderer, RENDERER_REVISION, render_settings_signature
 # Logging
 # ---------------------------------------------------------------------------
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
 log = logging.getLogger("rm-rebuilder.main")
 
 
@@ -1122,8 +1118,13 @@ Examples
 def main() -> None:
     args = _build_parser().parse_args()
 
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+    # Configure logging only when running this standalone entry point.
+    level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    logging.getLogger().setLevel(level)
 
     cache_dir   = args.cache
     output_base = args.output
