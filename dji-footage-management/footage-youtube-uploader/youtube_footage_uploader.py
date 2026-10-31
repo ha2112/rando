@@ -24,6 +24,7 @@ from pathlib import Path
 
 # Third-party imports
 from dotenv import load_dotenv
+from google.auth.exceptions import TransportError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -175,7 +176,20 @@ def get_authenticated_service():
         # If tokens exist but are expired, automatically refresh them using the refresh token
         if creds and creds.expired and creds.refresh_token:
             print("🔄  Refreshing access token…")
-            creds.refresh(Request())
+            # Retry connection failures; rejected credentials still fail immediately.
+            for attempt in range(MAX_RETRIES + 1):
+                try:
+                    creds.refresh(Request())
+                    break
+                except TransportError:
+                    if attempt == MAX_RETRIES:
+                        raise
+                    sleep_time = RETRY_SLEEP_BASE ** (attempt + 1)
+                    print(
+                        "   [WARN] Authentication connection failed. "
+                        f"Retrying in {sleep_time}s ({attempt + 1}/{MAX_RETRIES})"
+                    )
+                    time.sleep(sleep_time)
         else:
             # Otherwise, initiate a full OAuth 2.0 flow
             if not CLIENT_SECRETS.exists():
@@ -417,7 +431,13 @@ def main() -> None:
     # ── Authenticate with YouTube ──────────────────────────────────────────
     if not DRY_RUN:
         print("🔐  Authenticating with YouTube…")
-        youtube = get_authenticated_service()
+        try:
+            youtube = get_authenticated_service()
+        except TransportError:
+            sys.exit(
+                "❌  Could not reach Google for authentication after connection retries.\n"
+                "   Check your internet connection, DNS, and VPN, then rerun the job."
+            )
         print("✅  Authenticated.\n")
     else:
         print("🔐  [DRY RUN] Skipping YouTube authentication.\n")
