@@ -4,6 +4,7 @@ import io
 import json
 import zipfile
 import xml.dom.minidom
+from dataclasses import replace
 
 import pytest
 import requests
@@ -217,6 +218,68 @@ def test_fit_page_small_page_not_upscaled_but_screen_shaped(device):
     assert aspect_matches((w, h), device)
 
 
+def test_kindle_profile_is_users_paperwhite():
+    k = DEVICES["kindle"]
+    assert (k.width, k.height, k.cap, k.quality) == (1072, 1448, 1448, 70)
+    r = DEVICES["rm2"]
+    assert (r.width, r.height, r.cap, r.quality) == (1404, 1872, 1872, 70)
+
+
+def test_fit_page_source_sized_page_fits_kindle_screen():
+    # a typical 1200x1600 source page ends up exactly at the Kindle screen size
+    [page] = fit_page(Image.new("RGB", (1200, 1600)), DEVICES["kindle"])
+    assert size_of(page)[0] == (1072, 1448)
+
+
+def test_fit_page_lower_cap_shrinks_more():
+    dev = replace(DEVICES["kindle"], cap=1000)
+    [page] = fit_page(Image.new("RGB", (1200, 1600)), dev)
+    (w, h), _ = size_of(page)
+    assert h == 1000 and aspect_matches((w, h), dev)
+
+
+def test_fit_page_uncapped_keeps_source_resolution():
+    dev = replace(DEVICES["kindle"], cap=None)
+    [page] = fit_page(Image.new("RGB", (1200, 1600)), dev)
+    (w, h), _ = size_of(page)
+    # 1200x1600 is a bit wider than the Kindle's shape, so it's padded top/bottom: full width kept
+    assert w == 1200 and h >= 1600 and aspect_matches((w, h), dev)
+
+
+def test_fit_page_quality_changes_file_size():
+    # noisy image so JPEG quality actually matters
+    img = Image.effect_noise((600, 800), 60)
+    [low] = fit_page(img, replace(DEVICES["kindle"], quality=40))
+    [high] = fit_page(img, replace(DEVICES["kindle"], quality=95))
+    assert len(low) < len(high)
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("cap1448-q70", (1448, 70)),
+    ("cap1000-70", (1000, 70)),
+    ("uncap-100", (None, 100)),
+    ("UNCAP-Q90", (None, 90)),
+    (" cap1872-q70 ", (1872, 70)),
+])
+def test_parse_quality(text, expected):
+    assert manga_builder.parse_quality(text) == expected
+
+
+@pytest.mark.parametrize("text", ["cap-70", "uncap", "cap1448", "cap1448-q0", "cap1448-q101", "cap0-q70", "foo"])
+def test_parse_quality_rejects_bad_input(text):
+    with pytest.raises(ValueError):
+        manga_builder.parse_quality(text)
+
+
+def test_pick_quality_default_custom_and_retry(monkeypatch):
+    answers = iter(["", "nope", "uncap-100"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    kindle = DEVICES["kindle"]
+    assert manga_builder.pick_quality(kindle) == kindle  # Enter keeps cap1448-q70
+    custom = manga_builder.pick_quality(kindle)  # bad answer re-asked, then uncap-100
+    assert (custom.cap, custom.quality) == (None, 100)
+
+
 def test_fit_page_rotates_spread():
     # wide spread with a black left half; after a 90° CCW rotation the black half is at the bottom
     img = Image.new("L", (2000, 1400), 255)
@@ -349,6 +412,33 @@ def test_download_retries_page_list_on_server_error(tmp_path, monkeypatch):
     src.pages = lambda ch: (_ for _ in ()).throw(requests.HTTPError("500"))
     with pytest.raises(requests.HTTPError):
         manga_builder.download_chapter(src, Series("Fake", "s", "S"), Chapter(2, "Ch. 2", "c2"))
+
+
+def test_build_writes_each_chunk_before_downloading_the_next(tmp_path, monkeypatch):
+    monkeypatch.setattr(manga_builder, "DOWNLOAD_DIR", tmp_path / "dl")
+    monkeypatch.setattr(manga_builder, "OUTPUT_DIR", tmp_path / "out")
+    monkeypatch.setattr(manga_builder, "CHUNK_SIZE", 2)
+    url = "https://x/1.jpg"
+    src = FakeSource([url], {url: jpeg(50, 70)})
+    seen = []  # output files present when each chapter starts downloading
+
+    def pages(chapter):
+        seen.append((chapter.number, sorted(p.name for p in (tmp_path / "out").glob("*"))))
+        return [url]
+
+    src.pages = pages
+    outputs = manga_builder.build(src, Series("Fake", "s", "S"), chapters_of(1, 2, 3, 4, 5),
+                                  list(DEVICES.values()))
+
+    names = [p.name for p in outputs]
+    assert names == [
+        "S - Ch. 1-2 (Kindle Paperwhite).epub", "S - Ch. 1-2 (reMarkable 2).pdf",
+        "S - Ch. 3-4 (Kindle Paperwhite).epub", "S - Ch. 3-4 (reMarkable 2).pdf",
+        "S - Ch. 5 (Kindle Paperwhite).epub", "S - Ch. 5 (reMarkable 2).pdf",
+    ]
+    # chunk 1's files already exist when chapter 3 starts; chunk 2's when chapter 5 starts
+    assert seen[2] == (3, sorted(names[:2]))
+    assert seen[4] == (5, sorted(names[:4]))
 
 
 def test_download_skips_page_that_keeps_failing(tmp_path, monkeypatch):

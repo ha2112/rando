@@ -18,14 +18,15 @@ class Device:
     height: int
     dpi: int
     fmt: str  # "epub" or "pdf"
+    cap: int | None  # max page height in pixels; None = keep the source resolution
+    quality: int  # JPEG quality 1-100
 
 
 DEVICES = {
-    "kindle": Device("kindle", "Kindle Paperwhite", 1236, 1648, 300, "epub"),
-    "rm2": Device("rm2", "reMarkable 2", 1404, 1872, 226, "pdf"),
+    # defaults: cap at the screen's own height (no visible loss), quality 70 (~31% smaller files)
+    "kindle": Device("kindle", "Kindle Paperwhite", 1072, 1448, 300, "epub", cap=1448, quality=70),
+    "rm2": Device("rm2", "reMarkable 2", 1404, 1872, 226, "pdf", cap=1872, quality=70),
 }
-
-JPEG_QUALITY = 80  # e-ink shows 16 grays; higher quality only grows the file
 
 
 def fit_page(img, device):
@@ -50,8 +51,12 @@ def fit_page(img, device):
     out = []
     for piece in pieces:
         pw, ph = piece.size
-        # only shrink: the reader upscales on screen for free, upscaling here just bloats the file
-        scale = min(device.width / pw, device.height / ph, 1.0)
+        # only shrink, and only down to the cap box (cap tall, screen-shaped); no cap = keep as-is
+        if device.cap:
+            box_w, box_h = round(device.cap * device.width / device.height), device.cap
+            scale = min(box_w / pw, box_h / ph, 1.0)
+        else:
+            scale = 1.0
         if scale < 1:
             piece = piece.resize((max(1, round(pw * scale)), max(1, round(ph * scale))), Image.LANCZOS)
             pw, ph = piece.size
@@ -63,7 +68,7 @@ def fit_page(img, device):
         page = Image.new("L", (cw, ch), 255)
         page.paste(piece, ((cw - pw) // 2, (ch - ph) // 2))
         buf = io.BytesIO()
-        page.save(buf, "JPEG", quality=JPEG_QUALITY, optimize=True)
+        page.save(buf, "JPEG", quality=device.quality, optimize=True)
         out.append(buf.getvalue())
     return out
 

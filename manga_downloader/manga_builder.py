@@ -8,6 +8,7 @@ import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -22,6 +23,7 @@ DOWNLOAD_DIR = HERE / "downloads"  # raw images, kept so re-runs resume instead 
 OUTPUT_DIR = HERE / "output"  # finished EPUB / PDF files
 WORKERS = 6  # parallel image downloads per chapter
 RETRIES = 3
+CHUNK_SIZE = 50  # chapters per output file
 
 
 def safe_name(s):
@@ -46,6 +48,25 @@ def parse_selection(text, chapters):
         hi = float(m.group(2)) if m.group(2) else lo
         ranges.append((min(lo, hi), max(lo, hi)))
     return [c for c in chapters if any(lo <= c.number <= hi for lo, hi in ranges)]
+
+
+def parse_quality(text):
+    """'cap1448-q70' -> (1448, 70); 'uncap-100' -> (None, 100). The 'q' is optional."""
+    m = re.fullmatch(r"(?:cap(\d+)|uncap)-q?(\d+)", text.strip().lower())
+    if not m:
+        raise ValueError(f"can't read '{text}' (use e.g. cap1448-q70 or uncap-100)")
+    cap = int(m.group(1)) if m.group(1) else None
+    quality = int(m.group(2))
+    if cap == 0:
+        raise ValueError("cap must be more than 0")
+    if not 1 <= quality <= 100:
+        raise ValueError("quality must be 1-100")
+    return cap, quality
+
+
+def quality_text(device):
+    """The device's current setting written the way parse_quality reads it."""
+    return f"{'cap' + str(device.cap) if device.cap else 'uncap'}-q{device.quality}"
 
 
 def is_valid_image(path):
@@ -98,11 +119,20 @@ def download_chapter(src, series, chapter):
 
 
 def build(src, series, chapters, devices):
-    """Download the chapters and write one file per device. Returns the output paths."""
+    """Build in chunks of CHUNK_SIZE chapters; each chunk's files are written as soon as it's done."""
+    outputs = []
+    for start in range(0, len(chapters), CHUNK_SIZE):
+        outputs += build_chunk(src, series, chapters[start:start + CHUNK_SIZE], devices,
+                               start, len(chapters))
+    return outputs
+
+
+def build_chunk(src, series, chapters, devices, offset, total):
+    """Download one chunk of chapters and write one file per device. Returns the output paths."""
     rendered = {d.key: [] for d in devices}  # device key -> [(chapter label, [jpeg bytes])]
     built = []  # chapters that actually made it in
-    for n, ch in enumerate(chapters, 1):
-        print(f"[{n}/{len(chapters)}] {ch.label}")
+    for n, ch in enumerate(chapters, offset + 1):
+        print(f"[{n}/{total}] {ch.label}")
         try:
             paths = download_chapter(src, series, ch)
         except Exception as e:  # one bad chapter shouldn't sink the whole build
@@ -121,7 +151,7 @@ def build(src, series, chapters, devices):
         print(f"    {len(paths)} pages")
 
     if not built:
-        print("Nothing was downloaded, no files written.")
+        print("Nothing was downloaded in this chunk, no files written.")
         return []
     # label like "Ch. 1-10" from the chapters actually built
     first, last = fmt_number(built[0].number), fmt_number(built[-1].number)
@@ -133,6 +163,7 @@ def build(src, series, chapters, devices):
         out = OUTPUT_DIR / f"{safe_name(series.title)} - {span} ({d.name}).{d.fmt}"
         writer = write_epub if d.fmt == "epub" else write_pdf
         writer(out, f"{series.title} ({span})", rendered[d.key], d)
+        print(f"Wrote {out}")  # report now, not after the whole build
         outputs.append(out)
     return outputs
 
@@ -227,16 +258,27 @@ def pick_devices():
         print(f"  enter a number from 1 to {len(options) + 1}")
 
 
+def pick_quality(device):
+    """Ask for this device's cap/quality; Enter keeps the default."""
+    while True:
+        text = ask(f"{device.name} quality (cap<pixels>|uncap)-q<1-100>", quality_text(device))
+        try:
+            cap, quality = parse_quality(text)
+        except ValueError as e:
+            print(f"  {e}")
+            continue
+        return replace(device, cap=cap, quality=quality)
+
+
 def main():
     sources = [cls() for cls in SOURCES]
     try:
         src, series, chapters = pick_series(sources)
         selected = pick_chapters(chapters)
         print(f"\n{len(selected)} chapter(s) selected from {series.title} [{src.name}]")
-        devices = pick_devices()
+        devices = [pick_quality(d) for d in pick_devices()]  # only asks for chosen devices
         print()
-        for out in build(src, series, selected, devices):
-            print(f"Wrote {out}")
+        build(src, series, selected, devices)
     except (KeyboardInterrupt, EOFError):
         print("\nCancelled.")
         sys.exit(1)
