@@ -73,11 +73,16 @@ in `.TRASH/`. `--dry-run` has side effects in the current implementation; see
 
 ## Rendering limits
 
-Rendering supports `.rm` v6 scene files, handwritten strokes, and snapped text
-highlights. Some brushes use approximations. Missing ink files and supported
+Rendering supports `.rm` v6 scene files, handwritten strokes, snapped text
+highlights, and captured PNG images pasted into notebooks or PDFs. Captures use
+page-local PNG assets and indexed image meshes, preserving transparency, scene
+order, and layer visibility. PNG changes also invalidate cached renders. See
+[the capture format notes](CAPTURE_IMAGES.md) for sample evidence and limits.
+Some brushes use approximations. Missing ink files and supported
 scene extensions are reported as partial fidelity in the render-state manifest.
-Typed scene text, unresolved eraser operations, and unknown scene blocks outside
-the explicitly supported compatibility case fail rendering. Custom template
+Typed scene text, unresolved eraser operations, and unknown scene blocks fail
+rendering. Missing or invalid visible image assets also fail rendering, preserving
+the previous output. Custom template
 download is not implemented.
 
 ## Development

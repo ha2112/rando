@@ -10,6 +10,20 @@ from rm_sync.cli import app
 from rm_sync.main import RenderStateTracker, discover_cached_uuids
 
 
+# Keep CLI run logs out of the real RemarkableSync/logs folder.
+_log_dir = tempfile.TemporaryDirectory()
+_log_patch = patch("rm_sync.cli.LOG_DIR", Path(_log_dir.name))
+
+
+def setUpModule():
+    _log_patch.start()
+
+
+def tearDownModule():
+    _log_patch.stop()
+    _log_dir.cleanup()
+
+
 class DeletedTabletDocumentTests(unittest.TestCase):
     def test_full_sync_moves_untracked_deleted_document_output_to_trash(self):
         for force in (False, True):

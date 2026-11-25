@@ -31,7 +31,7 @@ from rich.table import Table
 # Flat imports match the style of the existing codebase.
 # rm_sync/__init__.py injects this directory into sys.path so they resolve.
 from client import RsyncClient, FileDownloader
-from config import _BASE_DIR, DONE_DIR, PROFILES, PROFILE_ORDER, RM_ROOT
+from config import _BASE_DIR, DONE_DIR, LOG_DIR, PROFILES, PROFILE_ORDER, RM_ROOT
 from main import (
     RenderStateTracker,
     _process_document,
@@ -85,12 +85,33 @@ def callback(
 
     # Keep normal output concise; verbose includes dependency diagnostics.
     level = logging.DEBUG if verbose else logging.ERROR
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
-    # Also reset the level when the CLI runs again in the same process.
-    logging.getLogger().setLevel(level)
+    log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    logging.basicConfig(format=log_format)
+    root = logging.getLogger()
+    # Console verbosity lives on the handlers, so the file can still get DEBUG.
+    # Also resets the level when the CLI runs again in the same process.
+    for handler in root.handlers:
+        handler.setLevel(level)
+    root.setLevel(logging.DEBUG)
+
+    # Every run keeps a full log, including tracebacks of failed documents.
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_file = LOG_DIR / f"rm-sync-{time.strftime('%Y%m%d-%H%M%S')}.log"
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(log_format))
+    # rmscene traces every block at DEBUG (MBs per document); keep its INFO+.
+    file_handler.addFilter(
+        lambda record: record.levelno > logging.DEBUG or not record.name.startswith("rmscene"))
+    root.addHandler(file_handler)
+    ctx.obj["log_file"] = log_file
+
+    def close_log():
+        root.removeHandler(file_handler)
+        file_handler.close()
+
+    # Detach after the command so repeated in-process runs don't stack handlers.
+    ctx.call_on_close(close_log)
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +279,7 @@ def sync(
         console.print("[red]Some documents failed:[/red]")
         for name, uuid, exc in errors:
             console.print(f"  ✗  {name}  [{uuid[:12]}…]  —  {exc}")
+        console.print(f"[dim]Details: {ctx.obj['log_file']}[/dim]")
         raise typer.Exit(2)
 
     console.print(f"[green]Done. Output → {output_base}[/green]")
@@ -503,6 +525,7 @@ def render(
     if errors:
         for name, uuid, exc in errors:
             console.print(f"  ✗  {name}  [{uuid[:12]}…]  —  {exc}")
+        console.print(f"[dim]Details: {ctx.obj['log_file']}[/dim]")
         raise typer.Exit(2)
 
     console.print(f"[green]Done. Output → {output_base}[/green]")

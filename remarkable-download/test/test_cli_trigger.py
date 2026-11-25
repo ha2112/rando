@@ -1,6 +1,8 @@
 import json
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from typer.testing import CliRunner
@@ -15,6 +17,20 @@ SECOND = "fcf5d7ba-95e1-421b-a7d8-e03f1d634897"
 
 def completed(stdout=""):
     return subprocess.CompletedProcess([], 0, stdout=stdout)
+
+
+# Keep CLI run logs out of the real RemarkableSync/logs folder.
+_log_dir = tempfile.TemporaryDirectory()
+_log_patch = patch("rm_sync.cli.LOG_DIR", Path(_log_dir.name))
+
+
+def setUpModule():
+    _log_patch.start()
+
+
+def tearDownModule():
+    _log_patch.stop()
+    _log_dir.cleanup()
 
 
 class TriggerCommandTests(unittest.TestCase):

@@ -111,19 +111,19 @@ class ExportCompatibilityTests(unittest.TestCase):
         finally:
             reference.close(); renderer.close()
 
-    def test_book_unknown_pair_preserves_base_page_pixels_and_reports_partial_fidelity(self):
+    def test_book_empty_capture_records_preserve_base_page_pixels(self):
         doc = self.manifest['documents'][1]; processor = StrokeProcessor()
         strokes, highlights = processor.decode_rm_file(FIXTURE / doc['uuid'] / (doc['failing_page'] + '.rm'))
         self.assertEqual((strokes, highlights), ([], []))
-        self.assertEqual([b['block_type'] for b in processor.unsupported_blocks], [14, 15])
-        self.assertEqual(sum(len(b['data']) for b in processor.unsupported_blocks), 23)
+        self.assertEqual(processor.unsupported_blocks, [])
+        self.assertEqual(processor.images, [])
         renderer = PDFRenderer(); base = fitz.open(FIXTURE / (doc['uuid'] + '.pdf'))
         reference = fitz.open(FIXTURE / doc['reference']['path_from_fixture'])
         page_info = DocumentParser(FIXTURE, doc['uuid']).parse_pages()[0]
         renderer.build_document([page_info], base, processor, lambda p: (strokes, highlights))
         try:
             self.assertEqual(renderer._doc[0].get_pixmap().samples, reference[0].get_pixmap().samples)
-            self.assertEqual(len(renderer.fidelity_warnings[0]['unsupported_blocks']), 2)
+            self.assertEqual(renderer.fidelity_warnings[0]['unsupported_blocks'], [])
         finally:
             renderer.close(); base.close(); reference.close()
 

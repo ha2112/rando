@@ -286,6 +286,7 @@ class RenderStateTracker:
         paths = [self.cache_dir / f"{uuid}{ext}"
                  for ext in (".metadata", ".content", ".pdf", ".pagedata")]
         paths.extend(sorted((self.cache_dir / uuid).glob("*.rm")))
+        paths.extend(sorted((self.cache_dir / uuid).rglob("*.png")))
         files = {}
         for path in paths:
             if path.is_file():

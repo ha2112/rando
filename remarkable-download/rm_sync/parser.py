@@ -18,7 +18,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from config import RM_HEIGHT, RM_WIDTH, SCALE
-from models import DocumentMeta, PageInfo, Stroke, Highlight, Point, Rectangle
+from models import DocumentMeta, PageInfo, Stroke, Highlight, Point, Rectangle, SceneImage
+from scene_images import decode_image_blocks
 
 try:
     import rmscene  # type: ignore[import]
@@ -213,6 +214,7 @@ class StrokeProcessor:
         self.extensions = []
         self.missing_source = False
         self.unsupported_blocks = []
+        self.images = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -241,6 +243,7 @@ class StrokeProcessor:
         self.extensions = []
         self.missing_source = False
         self.unsupported_blocks = []
+        self.images = []
         if not rm_path.exists():
             # Untouched notebook pages need not have an .rm file.
             self.missing_source = True
@@ -250,34 +253,13 @@ class StrokeProcessor:
         try:
             with rm_path.open("rb") as fh:
                 raw_blocks = list(rmscene.read_blocks(fh))
-            # Compatibility is limited to the exact observed pair, not all unknown blocks.
-            allowed_extensions = {
-                (14, 3, 3, bytes.fromhex("1c0100000000")),
-                (15, 2, 2, bytes.fromhex("1f000b2f01143f00004f00005401000000")),
-            }
+            supported, image_blocks, assets = decode_image_blocks(raw_blocks)
             unreadable = [(index, b) for index, b in enumerate(raw_blocks)
-                          if b.__class__.__name__ == "UnreadableBlock"]
-            signatures = set()
-            for _, block in unreadable:
-                info = getattr(block, "info", None)
-                signatures.add((getattr(info, "block_type", None),
-                                getattr(info, "min_version", None),
-                                getattr(info, "current_version", None),
-                                getattr(block, "data", None)))
-            if unreadable and (len(unreadable) != 2 or signatures != allowed_extensions):
+                          if b.__class__.__name__ == "UnreadableBlock" and index not in supported]
+            if unreadable:
                 index, block = unreadable[0]
                 raise ValueError(f"Unsupported scene block {index}: {block}")
             for index, block in enumerate(raw_blocks):
-                if block.__class__.__name__ == "UnreadableBlock":
-                    info = block.info
-                    self.unsupported_blocks.append(dict(block_index=index,
-                        block_type=info.block_type, min_version=info.min_version,
-                        current_version=info.current_version, data=block.data,
-                        error=block.error))
-                    self.extensions.append(dict(block_index=index,
-                        block_type=f"Unknown_0x{info.block_type:02x}", field="data", data=block.data))
-                    log.warning("%s: partial fidelity: preserved unknown block 0x%02x (%d bytes)",
-                                rm_path.name, info.block_type, len(block.data))
                 for field in ("extra_data", "extra_value_data"):
                     data = getattr(block, field, b"")
                     if data:
@@ -287,6 +269,9 @@ class StrokeProcessor:
                     self.paper_size = getattr(block, "paper_size", None)
             tree = rmscene.SceneTree()
             rmscene.build_tree(tree, raw_blocks)
+            # rmscene ignores 0x0f; insert decoded images into the same CRDT tree.
+            for block in image_blocks.values():
+                tree.add_item(block.item, block.parent_id)
             if tree.root_text is not None and any(
                     not item.deleted_length and isinstance(item.value, str) and item.value
                     for item in tree.root_text.items.sequence_items()):
@@ -302,6 +287,7 @@ class StrokeProcessor:
         # Resolve scene order and visibility before splitting ink and glyphs.
         source = {b.item.item_id: i for i, b in enumerate(raw_blocks)
                   if getattr(b, "item", None) is not None}
+        source.update({b.item.item_id: i for i, b in image_blocks.items()})
         strokes, highlights = [], []
 
         def visit(group, offset=(0.0, 0.0)):
@@ -325,6 +311,18 @@ class StrokeProcessor:
 
         for order, (item_id, value, offset) in enumerate(visit(tree.root)):
             index = source[item_id]
+            if isinstance(value, SceneImage):
+                filename = assets.get(value.asset_id)
+                if filename is None:
+                    raise ValueError(f"Missing image asset reference in {rm_path}")
+                asset_path = rm_path.with_suffix('') / filename
+                try:
+                    data = asset_path.read_bytes()
+                except OSError as exc:
+                    raise ValueError(f"Missing image asset: {asset_path}") from exc
+                self.images.append(replace(value, data=data, scene_order=order,
+                    item_id=str(item_id), scene_offset=offset))
+                continue
             parsed = self._parse_stroke(value, index)
             if parsed is not None:
                 if parsed.tool in (6, 8):
@@ -336,6 +334,25 @@ class StrokeProcessor:
                     highlights.append(replace(parsed, scene_order=order, item_id=str(item_id), scene_offset=offset))
 
         return strokes, highlights
+
+    def scale_images(self, images, target_width_pt, target_height_pt, *,
+                     is_pdf_page=False, x_origin_pt=0.0, y_origin_pt=0.0, source_size=None):
+        """Place mesh positions with the ink transform; retain texture coordinates."""
+        if is_pdf_page:
+            sx = sy = SCALE
+            x_offset = target_width_pt / SCALE / 2
+        else:
+            width, height = source_size or self.paper_size or (RM_WIDTH, RM_HEIGHT)
+            sx, sy = target_width_pt / width, target_height_pt / height
+            x_offset = width / 2
+        result = []
+        for image in images:
+            dx, dy = image.scene_offset
+            vertices = [((x + dx + x_offset) * sx + x_origin_pt,
+                         (y + dy) * sy + y_origin_pt, u, v)
+                        for x, y, u, v in image.vertices]
+            result.append(replace(image, vertices=vertices, scene_offset=(0.0, 0.0)))
+        return result
 
     @staticmethod
     def _empty_heading_anchor(group, text):

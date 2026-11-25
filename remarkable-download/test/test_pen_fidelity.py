@@ -30,6 +30,20 @@ def stroke(tool=17, widths=(8, 8), pressures=(0, 255), rgba=None):
                   block_index=0, color_rgba=rgba)
 
 
+# Keep CLI run logs out of the real RemarkableSync/logs folder.
+_log_dir = tempfile.TemporaryDirectory()
+_log_patch = patch("rm_sync.cli.LOG_DIR", Path(_log_dir.name))
+
+
+def setUpModule():
+    _log_patch.start()
+
+
+def tearDownModule():
+    _log_patch.stop()
+    _log_dir.cleanup()
+
+
 class PenModelTests(unittest.TestCase):
     def test_pen_ids_match_decoder_including_legacy_and_erasers(self):
         names = {'MECH_PENCIL_1': 'MECHANICAL_PENCIL_1',

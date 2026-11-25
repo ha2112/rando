@@ -34,6 +34,7 @@ class LoggingCommandTests(unittest.TestCase):
             root = Path(temp)
             with (
                 patch.object(self.root, "handlers", [handler]),
+                patch("rm_sync.cli.LOG_DIR", root / "logs"),
                 patch("rm_sync.cli.discover_cached_uuids", return_value=["test-uuid"]),
                 patch("rm_sync.cli._process_document", side_effect=process),
             ):
@@ -42,6 +43,9 @@ class LoggingCommandTests(unittest.TestCase):
                     flags + ["render", "--cache", str(root / "cache"),
                              "--output", str(root / "output")],
                 )
+                # Only the console handler may remain after the command.
+                self.assertEqual(self.root.handlers, [handler])
+            self.log_files = {p.name: p.read_text() for p in (root / "logs").glob("*.log")}
         return result, logs.getvalue()
 
     def test_default_shows_progress_without_diagnostic_logs(self):
@@ -78,6 +82,19 @@ class LoggingCommandTests(unittest.TestCase):
                     self.assertIn("Traceback", logs)
                 else:
                     self.assertEqual(logs, "")
+
+    def test_every_run_writes_debug_log_file_with_failure_traceback(self):
+        result, logs = self.render([], fail=True)
+
+        self.assertEqual(logs, "")
+        self.assertEqual(len(self.log_files), 1)
+        (name, text), = self.log_files.items()
+        self.assertIn(name, result.output.replace("\n", ""))
+        for message in ("Traceback", "invalid scene"):
+            self.assertIn(message, text)
+        # rmscene's per-block DEBUG tracing is too large to keep for every run.
+        self.assertEqual(text.count("debug diagnostic"), 1)
+        self.assertEqual(text.count("warning diagnostic"), 2)
 
 
 if __name__ == "__main__":

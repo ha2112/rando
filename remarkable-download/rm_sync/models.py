@@ -165,3 +165,17 @@ class Rectangle:
     y: float
     w: float
     h: float
+
+
+@dataclass
+class SceneImage:
+    """A captured PNG placed by indexed (x, y, u, v) mesh vertices."""
+
+    asset_id: bytes
+    vertices: List[Tuple[float, float, float, float]]
+    triangles: List[Tuple[int, int, int]]
+    block_index: int
+    data: bytes = b""
+    scene_order: int = 0
+    item_id: Optional[str] = None
+    scene_offset: Tuple[float, float] = (0.0, 0.0)

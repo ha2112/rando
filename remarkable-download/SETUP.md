@@ -79,7 +79,9 @@ Use `rm-sync COMMAND --help` to inspect command-specific options.
 
 Normal runs show CLI progress, summaries, and errors while suppressing debug,
 info, and warning logs. Use `--verbose` or `-v` to include those diagnostic logs
-and tracebacks for failed documents:
+and tracebacks for failed documents. Every run also writes the full debug log,
+including those tracebacks, to `logs/rm-sync-YYYYMMDD-HHMMSS.log`; the failure
+summary prints its path. Old log files are not removed automatically.
 
 ```bash
 rm-sync --verbose sync --mode usb

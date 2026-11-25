@@ -11,6 +11,7 @@ PDFRenderer does the following:
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import json
 import logging
@@ -25,13 +26,13 @@ from config import (BLANK_PAGE_HEIGHT_PT, BLANK_PAGE_WIDTH_PT, SCALE,
                     HIGHLIGHT_OPACITY_PLAIN, PEN_COLOR_MAP)
 from brushes import draw_ink, glyph_highlight_color, painted_bounds
 
-from models import Highlight, PageInfo, Stroke
+from models import Highlight, PageInfo, Stroke, SceneImage
 from parser import StrokeProcessor
 
 log = logging.getLogger("rm-rebuilder.renderer")
 
 # Bump when geometry, palette, or brush behavior changes.
-RENDERER_REVISION = "pen-measurements-v3-snapped-highlight-blending"
+RENDERER_REVISION = "pen-measurements-v4-capture-images"
 
 
 def render_settings_signature():
@@ -139,6 +140,9 @@ class PDFRenderer:
             x_origin_pt=x_origin,
             y_origin_pt=y_origin,
         )
+        scaled_images = processor.scale_images(
+            processor.images, target_w, target_h, is_pdf_page=is_pdf_page,
+            x_origin_pt=x_origin, y_origin_pt=y_origin)
 
         # ------------------------------------------------------
         # 3. COMPUTE BOUNDING BOX
@@ -146,7 +150,7 @@ class PDFRenderer:
         content_bbox = self._compute_content_bbox(
             scaled_strokes,
             scaled_highlights,
-            base_rect=fitz.Rect(0, 0, target_w, target_h)
+            base_rect=fitz.Rect(0, 0, target_w, target_h), images=scaled_images
         )
 
         if not is_pdf_page:
@@ -156,7 +160,7 @@ class PDFRenderer:
                 content_bbox.y1 = max(content_bbox.y1,
                     max((p.y for s in scaled_strokes for p in s.points), default=0) + 50 * SCALE)
             painted = self._compute_content_bbox(scaled_strokes, scaled_highlights,
-                                                 fitz.Rect(0, 0, 0, 0))
+                                                 fitz.Rect(0, 0, 0, 0), images=scaled_images)
             # Round nominal dimensions, while retaining all painted extents.
             content_bbox.x1 = max(round(target_w), painted.x1)
             content_bbox.y1 = max(round(target_h), round(content_bbox.y1), painted.y1)
@@ -192,7 +196,9 @@ class PDFRenderer:
                 r.x += dx
                 r.y += dy
 
-        self._draw_items(new_page, scaled_strokes, scaled_highlights)
+        scaled_images = [replace(image, vertices=[(x + dx, y + dy, u, v)
+                          for x, y, u, v in image.vertices]) for image in scaled_images]
+        self._draw_items(new_page, scaled_strokes, scaled_highlights, scaled_images)
 
     # ==========================================================
     # BOUNDING BOX LOGIC
@@ -201,7 +207,8 @@ class PDFRenderer:
         self,
         strokes,
         highlights,
-        base_rect: fitz.Rect
+        base_rect: fitz.Rect,
+        images=(),
     ) -> fitz.Rect:
         xs = []
         ys = []
@@ -218,6 +225,13 @@ class PDFRenderer:
             for r in h.rectangles:
                 xs.extend([r.x, r.x + r.w])
                 ys.extend([r.y, r.y + r.h])
+
+        for image in images:
+            # Unreferenced vertices are not painted by the mesh.
+            for index in {i for triangle in image.triangles for i in triangle}:
+                x, y, _, _ = image.vertices[index]
+                xs.append(x)
+                ys.append(y)
 
         if not xs:
             return base_rect
@@ -305,14 +319,52 @@ class PDFRenderer:
             y_origin_pt=y_origin,
         )
 
-        self._draw_items(page, scaled_strokes, scaled_highlights)
+        scaled_images = processor.scale_images(
+            processor.images, target_w, target_h, is_pdf_page=is_pdf_page,
+            x_origin_pt=x_origin, y_origin_pt=y_origin)
+        self._draw_items(page, scaled_strokes, scaled_highlights, scaled_images)
 
-    def _draw_items(self, page, strokes, highlights):
-        for item in sorted([*strokes, *highlights], key=lambda item: item.scene_order):
+    def _draw_items(self, page, strokes, highlights, images=()):
+        for item in sorted([*strokes, *highlights, *images], key=lambda item: item.scene_order):
             if isinstance(item, Highlight):
                 self._draw_glyph_highlight(page, item)
+            elif isinstance(item, SceneImage):
+                self._draw_image(page, item)
             else:
                 self._draw_stroke(page, item)
+
+    @staticmethod
+    def _draw_image(page, image):
+        # Let MuPDF embed the PNG and its alpha mask without resampling.
+        try:
+            xref = page.insert_image(fitz.Rect(0, 0, 1, 1), stream=image.data,
+                                     keep_proportion=False)
+        except Exception as exc:
+            raise ValueError(f"Invalid image asset for item {image.item_id}") from exc
+        name = next(entry[7] for entry in reversed(page.get_images()) if entry[0] == xref)
+        meshes = {}
+        for triangle in image.triangles:
+            points = [image.vertices[i] for i in triangle]
+            # PDF image and page coordinates both have their origins at the bottom.
+            a, b, c = [(x, page.rect.height - y, u, 1 - v) for x, y, u, v in points]
+            du1, dv1 = b[2] - a[2], b[3] - a[3]
+            du2, dv2 = c[2] - a[2], c[3] - a[3]
+            det = du1 * dv2 - du2 * dv1
+            ax = ((b[0] - a[0]) * dv2 - (c[0] - a[0]) * dv1) / det
+            bx = ((c[0] - a[0]) * du1 - (b[0] - a[0]) * du2) / det
+            ay = ((b[1] - a[1]) * dv2 - (c[1] - a[1]) * dv1) / det
+            by = ((c[1] - a[1]) * du1 - (b[1] - a[1]) * du2) / det
+            tx, ty = a[0] - ax * a[2] - bx * a[3], a[1] - ay * a[2] - by * a[3]
+            matrix = f"{ax:.9f} {ay:.9f} {bx:.9f} {by:.9f} {tx:.9f} {ty:.9f}"
+            # Combine triangles sharing a transform to avoid alpha/antialias seams.
+            if (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]) < 0:
+                b, c = c, b
+            meshes.setdefault(matrix, []).append(
+                f"{a[0]:.9f} {a[1]:.9f} m\n{b[0]:.9f} {b[1]:.9f} l\n"
+                f"{c[0]:.9f} {c[1]:.9f} l\nh\n")
+        commands = [f"q\n{''.join(paths)}W n\n{matrix} cm\n/{name} Do\nQ\n"
+                    for matrix, paths in meshes.items()]
+        page.parent.update_stream(page.get_contents()[-1], ''.join(commands).encode('ascii'))
 
     # ------------------------------------------------------------------
     # Output
