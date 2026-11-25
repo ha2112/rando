@@ -64,6 +64,7 @@ RETRY_SLEEP_BASE = 2   # seconds  (exponential back-off: 2, 4, 8, 16, 32 s)
 
 # Output mode: True = log-friendly (no tqdm, for cron/automation), False = interactive (tqdm, for manual runs)
 LOG_MODE = False
+PROGRESS_LOG_INTERVAL = 30  # seconds between plain-text upload updates
 
 # ── Filename / foldername parsers ─────────────────────────────────────────────
 
@@ -252,7 +253,7 @@ def upload_video(
     """
     Upload a single video to YouTube (private).
     In interactive mode: shows a live tqdm progress bar.
-    In log mode: no progress bar, log-friendly output.
+    In log mode: plain-text progress every 30 seconds after a chunk completes.
     Returns the YouTube video ID on success.
     Raises HttpError on unrecoverable API errors.
     """
@@ -314,10 +315,33 @@ def upload_video(
         time.sleep(sleep_time)
 
     if LOG_MODE:
-        # Log mode: no tqdm, simple progress messages
+        started_at = time.monotonic()
+        last_log_at = started_at
+
+        def log_progress(now):
+            elapsed = max(now - started_at, 0.001)
+            percent = 100 * bytes_sent / file_size if file_size else 100
+            rate = bytes_sent / elapsed / (1024 ** 2)
+            # Report acknowledged bytes, not TCP counters or summed retries.
+            print(
+                f"   [PROGRESS] {time.strftime('%Y-%m-%d %H:%M:%S')} | "
+                f"{percent:.1f}% | {bytes_sent / (1024 ** 3):.2f}/"
+                f"{file_size / (1024 ** 3):.2f} GiB | "
+                f"{bytes_sent}/{file_size} bytes | avg {rate:.2f} MiB/s",
+                flush=True,
+            )
+
+        log_progress(started_at)
         while response is None:
             try:
                 status, response = do_upload_chunk()
+                now = time.monotonic()
+                if response is not None:
+                    bytes_sent = file_size
+                # Always emit the final count, even for a quick upload.
+                if now - last_log_at >= PROGRESS_LOG_INTERVAL or response is not None:
+                    log_progress(now)
+                    last_log_at = now
             except HttpError as err:
                 if err.resp.status in (500, 502, 503, 504):
                     handle_retry(err)
@@ -325,7 +349,7 @@ def upload_video(
                     raise
         # Log completion
         size_mb = file_size / (1024 * 1024)
-        print(f"   [OK] Uploaded {file_path.name} ({size_mb:.1f} MB)")
+        print(f"   [OK] Uploaded {file_path.name} ({size_mb:.1f} MB)", flush=True)
     else:
         # Interactive mode: tqdm progress bar
         with tqdm(
